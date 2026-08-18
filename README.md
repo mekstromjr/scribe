@@ -6,8 +6,8 @@ the Obsidian vault with a thorough summary plus the complete extracted text.
 Backed by [`ollama-mini`](https://gitlab.meklab.net/meklab/k8s/-/tree/main/apps/ollama-mini)
 (CPU-only Ollama in the `infra` namespace).
 
-**Status: Phase 2 — extraction, summarization, and note rendering. CLI only.** No Slack
- and no vault writes yet.
+**Status: Phase 3 — extraction, summarization, note rendering, and vault publishing.**
+CLI only; Slack comes in Phase 4.
 
 ## The core design decision: extract before OCR
 
@@ -44,9 +44,13 @@ scribe extract deck.pdf --per-page
 scribe extract https://example.com/article
 scribe extract scan.png
 
-# Extract + summarize + render the vault note
+# Extract + summarize + render the vault note (prints it)
 scribe note deck.pdf
 scribe note https://example.com/article --out-dir ~/notes
+
+# ...and commit it to the Obsidian vault
+scribe publish deck.pdf
+scribe publish https://example.com/article
 ```
 
 ### Running against the cluster from a laptop
@@ -97,6 +101,34 @@ the models it serves, and fails if the expected models are missing.
   Wikimedia's robot policy asks automated clients to declare themselves; complying works
   better than evading.
 
+## Vault publishing
+
+Notes are committed to `mekadmin/mekvault` (project 2) at `+/`, the vault's own inbox
+convention for new unsorted notes. Local PDFs and images travel with the note into
+`Misc/Files/` and are wikilinked; links do not, since the URL is already in the
+frontmatter.
+
+Three deliberate choices:
+
+- **One commit, not two.** The note and its attachment go up together via the commits
+  API. Two separate file-API calls could leave the vault with a note whose wikilink
+  points at a file that never committed — a dangling link in a repo that syncs to every
+  device.
+- **The attachment path resolves *before* rendering.** The note has to link the
+  attachment, but its final path is only known after collision resolution. Rendering
+  first would mean guessing the name.
+- **`unique_path` never overwrites.** A second note about the same source is a new note;
+  silently replacing one you may have edited since is data loss. Collisions append
+  ` (2)`, ` (3)`, and give up after 99 rather than looping.
+
+Needs `SCRIBE_GITLAB_TOKEN` — a project access token on the vault with
+`write_repository`. The vault syncs to Obsidian over iCloud with Obsidian Git as version
+control; the cluster cannot write iCloud, so scribe commits and the plugin pulls.
+
+**If notes stop appearing, check that Obsidian Git can still push.** It commits locally
+first, so a broken remote leaves the repo looking healthy while the server silently falls
+behind — that failure went unnoticed for three months.
+
 ## Reused from recipe-pipeline
 
 `src/scribe/ollama.py` and the PDF rendering in `src/scribe/extract/pdf.py` are adapted from
@@ -122,9 +154,13 @@ All settings are env-overridable with the `SCRIBE_` prefix (see `src/scribe/conf
 | `SCRIBE_NUM_THREAD` | `6` | **Must match the CPU limit in `apps/ollama-mini/deployment.yaml`** |
 | `SCRIBE_OCR_MAX_EDGE` | `1500` | Longest-edge cap for vision input |
 | `SCRIBE_MAX_OCR_PAGES` | `0` (unlimited) | Skipped pages are recorded, not silently dropped |
+| `SCRIBE_GITLAB_TOKEN` | *(none)* | Project access token, `write_repository` on the vault |
+| `SCRIBE_VAULT_PROJECT_ID` | `2` | `mekadmin/mekvault` |
+| `SCRIBE_VAULT_NOTES_DIR` | `+` | The vault's inbox convention |
+| `SCRIBE_VAULT_FILES_DIR` | `Misc/Files` | Where attachments land |
+| `SCRIBE_MAX_ATTACHMENT_BYTES` | `10485760` | Above this the note publishes without the source |
 
 ## Roadmap
 
-- **Phase 3** — publish to `mekadmin/mekvault` via the GitLab API
 - **Phase 4** — Slack Socket Mode (outbound WebSocket; Slack cannot reach the tailnet)
 - **Phase 5** — deploy to `infra`, Standard tier, Deployment only (no Service/Ingress)

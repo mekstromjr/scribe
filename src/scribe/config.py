@@ -69,6 +69,24 @@ class Settings(BaseSettings):
     # Headroom for the prompt scaffolding and the generated summary itself.
     response_reserve_tokens: int = 6000
 
+    # --- Obsidian vault publishing -------------------------------------------------
+    # mekadmin/mekvault. The vault syncs to Obsidian over iCloud with Obsidian Git as
+    # version control; the cluster cannot write iCloud, so scribe commits here and the
+    # plugin pulls. Needs a project access token with write_repository.
+    gitlab_url: str = "https://gitlab.meklab.net"
+    vault_project_id: int = 2
+    vault_branch: str = "main"
+    gitlab_token: str = ""
+
+    # The vault's own convention: new notes land in the `+/` inbox for later sorting
+    # (see the vault's CLAUDE.md). The `aigen` tag preserves the AI-generated marker.
+    vault_notes_dir: str = "+"
+    vault_files_dir: str = "Misc/Files"
+
+    # The vault repo syncs to every device, so a large binary is a lasting cost. Above
+    # this, the source file is skipped and the note simply has no attachment link.
+    max_attachment_bytes: int = 10 * 1024 * 1024
+
 
 def load_settings() -> Settings:
     return Settings()
