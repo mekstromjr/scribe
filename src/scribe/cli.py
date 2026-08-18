@@ -1,4 +1,4 @@
-"""scribe CLI. Extraction and note rendering; Slack and vault publishing land later."""
+"""scribe CLI: extract, summarize, publish to the vault, and run the Slack bot."""
 
 from __future__ import annotations
 
@@ -122,6 +122,13 @@ def _cmd_publish(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Run the Slack Socket Mode bot. Blocks."""
+    from scribe.slack_app import run
+
+    return run()
+
+
 def _cmd_probe(args: argparse.Namespace) -> int:
     """Classify a PDF without spending any CPU on OCR."""
     path = Path(args.target).expanduser()
@@ -173,6 +180,9 @@ def main() -> int:
     p_publish = sub.add_parser("publish", help="extract, summarize, and commit to the vault")
     p_publish.add_argument("target")
     p_publish.set_defaults(func=_cmd_publish)
+
+    p_serve = sub.add_parser("serve", help="run the Slack bot (Socket Mode)")
+    p_serve.set_defaults(func=_cmd_serve)
 
     p_probe = sub.add_parser("probe", help="check whether a PDF has a text layer (no OCR)")
     p_probe.add_argument("target")

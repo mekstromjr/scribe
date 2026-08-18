@@ -10,6 +10,7 @@ dependencies = [
     "pillow>=11.1.0",
     "pypdfium2>=4.30.0",
     "trafilatura>=2.0.0",
+    "slack-bolt>=1.21.0",
 ]
 
 [project.scripts]

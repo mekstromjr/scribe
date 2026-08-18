@@ -87,6 +87,13 @@ class Settings(BaseSettings):
     # this, the source file is skipped and the note simply has no attachment link.
     max_attachment_bytes: int = 10 * 1024 * 1024
 
+    # --- Slack ---------------------------------------------------------------------
+    # Socket Mode needs BOTH: a bot token from installing the app, and an app-level
+    # token with connections:write minted under Basic Information. See SLACK_SETUP.md —
+    # the app-level token cannot be created from a manifest.
+    slack_bot_token: str = ""
+    slack_app_token: str = ""
+
 
 def load_settings() -> Settings:
     return Settings()
