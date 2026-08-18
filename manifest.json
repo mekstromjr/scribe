@@ -2,7 +2,8 @@
   "display_information": {
     "name": "scribe",
     "description": "Send a link, PDF, or image; get a summary in thread and a full note in your Obsidian vault.",
-    "background_color": "#2c3e50"
+    "background_color": "#2c3e50",
+    "long_description": "Send scribe a link, PDF, or image \u2014 as a direct message, or by @-mentioning it in a channel. It extracts the text (reading a PDF's text layer where there is one, and falling back to OCR only for scans), writes a thorough summary, and saves a note to the Obsidian vault inbox.\n\nYou get a short TL;DR back in the thread, along with a link that opens the note directly in Obsidian on your phone or laptop.\n\nEverything runs on self-hosted hardware \u2014 no document ever leaves the network. Because summarization runs on CPU, a long article takes several minutes; documents are handled one at a time and scribe reports your position in the queue. Send \"help\" for a reminder of any of this."
   },
   "features": {
     "bot_user": {
