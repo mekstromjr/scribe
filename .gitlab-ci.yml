@@ -1,15 +1,71 @@
-# Placeholder pipeline. New GitLab projects here inherit a broken Auto DevOps template
-# unless a .gitlab-ci.yml exists, so this file is load-bearing even while nearly empty.
-# Image builds land in Phase 5.
+# scribe CI
+#
+#   test  — ruff + pytest (no network; the Slack/Ollama/GitLab layers are stubbed)
+#   build — Kaniko -> registry.meklab.net/$CI_PROJECT_PATH
+#
+# Image tags:
+#   :<short-sha>  always
+#   :latest       on main
+#   :<tag>        on a semver tag push (vX.Y.Z) — what the k8s Deployment pins
+#
+# GitLab namespaces registry images by PROJECT path, so this is
+# registry.meklab.net/meklab/scribe.
+
 stages:
   - test
+  - build
 
-lint-and-test:
+include:
+  - template: Security/Secret-Detection.gitlab-ci.yml
+
+variables:
+  REGISTRY: registry.meklab.net
+  IMAGE_PATH: $CI_PROJECT_PATH
+
+secret_detection:
   stage: test
-  image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+  rules:
+    - if: $CI_COMMIT_BRANCH || $CI_COMMIT_TAG
+      when: always
+
+test:
+  stage: test
+  image: ghcr.io/astral-sh/uv:0.7.17-python3.12-bookworm-slim
   tags:
     - meklab-k3s
   script:
     - uv sync --frozen
-    - uv run ruff check src/ tests/
-    - uv run pytest -q
+    - uv run --no-sync ruff check src/ tests/
+    - uv run --no-sync pytest -q
+
+build:image:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [""]
+  tags:
+    - meklab-k3s
+  script:
+    - |
+      DEST_ARGS="--destination=${REGISTRY}/${IMAGE_PATH}:${CI_COMMIT_SHORT_SHA}"
+      if [ "$CI_COMMIT_BRANCH" = "main" ]; then
+        DEST_ARGS="$DEST_ARGS --destination=${REGISTRY}/${IMAGE_PATH}:latest"
+      fi
+      if [ -n "$CI_COMMIT_TAG" ]; then
+        DEST_ARGS="$DEST_ARGS --destination=${REGISTRY}/${IMAGE_PATH}:${CI_COMMIT_TAG}"
+      fi
+    - |
+      /kaniko/executor \
+        --context "${CI_PROJECT_DIR}" \
+        --dockerfile "${CI_PROJECT_DIR}/Dockerfile" \
+        --cache=true \
+        --cache-repo="${REGISTRY}/${IMAGE_PATH}/cache" \
+        --snapshot-mode=redo \
+        --use-new-run \
+        $DEST_ARGS
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/
+      when: always
+    - if: $CI_COMMIT_BRANCH == "main"
+      when: always
+    - when: never
