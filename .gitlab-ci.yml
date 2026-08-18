@@ -1,0 +1,15 @@
+# Placeholder pipeline. New GitLab projects here inherit a broken Auto DevOps template
+# unless a .gitlab-ci.yml exists, so this file is load-bearing even while nearly empty.
+# Image builds land in Phase 5.
+stages:
+  - test
+
+lint-and-test:
+  stage: test
+  image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+  tags:
+    - meklab-k3s
+  script:
+    - uv sync --frozen
+    - uv run ruff check src/ tests/
+    - uv run pytest -q
