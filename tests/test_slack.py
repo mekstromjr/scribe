@@ -51,3 +51,20 @@ class TestPending:
         p.done()
         p.done()
         assert p.add() == 0
+
+
+class TestHelpGating:
+    """Help is on request only. Answering every unrecognized message turns the bot into a
+    nag — and worse, Slack's unfurl events used to trigger it on every link."""
+
+    def test_help_words_cover_common_asks(self):
+        from scribe.slack_app import HELP_WORDS
+
+        for word in ("help", "?", "usage"):
+            assert word in HELP_WORDS
+
+    def test_help_text_explains_the_inputs(self):
+        from scribe.slack_app import HELP_TEXT
+
+        for expected in ("link", "PDF", "image", "Obsidian"):
+            assert expected in HELP_TEXT

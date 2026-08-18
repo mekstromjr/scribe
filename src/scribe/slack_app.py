@@ -36,6 +36,16 @@ log = logging.getLogger("scribe.slack")
 _URL = re.compile(r"<(https?://[^|>\s]+)(?:\|[^>]*)?>")
 _BARE_URL = re.compile(r"https?://\S+")
 
+HELP_WORDS = {"help", "?", "usage", "how does scribe work?", "how does this work?"}
+HELP_TEXT = (
+    "Send me a *link*, *PDF*, or *image* — as a DM here, or @-mention me in a channel.\n\n"
+    "I extract the text, write a thorough summary, and save a note to your Obsidian vault "
+    "inbox (`+/`). You get the TL;DR back in thread with a link that opens the note in "
+    "Obsidian.\n\n"
+    "Documents are processed one at a time and a long article takes several minutes — "
+    "I'll tell you where you are in the queue."
+)
+
 
 def first_url(text: str) -> str | None:
     m = _URL.search(text or "")
@@ -172,6 +182,16 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
         if event.get("bot_id") or event.get("subtype") == "bot_message":
             return
 
+        # Slack fires a SECOND message event when it unfurls a link — subtype
+        # "message_changed", because the message is edited to attach the preview card.
+        # That event carries no top-level text, so it used to fall through to the help
+        # reply: every link produced a spurious extra message. Edits, deletions and thread
+        # broadcasts arrive the same way. Only a genuine new message (no subtype) or a
+        # file upload is actionable.
+        subtype = event.get("subtype")
+        if subtype not in (None, "file_share"):
+            return
+
         channel = event["channel"]
         # Reply in a thread on the original message so the channel stays readable.
         thread_ts = event.get("thread_ts") or event["ts"]
@@ -199,10 +219,12 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
             source_label = target
 
         if not target:
-            say(
-                text="Send me a link, PDF, or image and I'll summarize it into your vault.",
-                thread_ts=thread_ts,
-            )
+            # Help ON REQUEST only. Answering every unrecognized message turns the bot
+            # into a nag; the same text lives in the app's description for discovery.
+            if event.get("text", "").strip().lower().lstrip("!/") in HELP_WORDS:
+                say(text=HELP_TEXT, thread_ts=thread_ts)
+            else:
+                log.info("no link or file in message; staying quiet")
             return
 
         job = Job.new(channel, thread_ts, target, source_label or target)
