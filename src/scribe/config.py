@@ -46,10 +46,28 @@ class Settings(BaseSettings):
 
     ollama_timeout_seconds: float = 1800.0
 
+    # MEASURED, not guessed. llama.cpp sizes its thread pool from HOST core count and
+    # ignores the container's cgroup quota, so on a 10-CPU node with a 6-CPU limit it
+    # oversubscribes and the threads fight CFS throttling. Pinning to the limit measured
+    # +73% generation (4.0 -> 6.9 tok/s) and +48% prompt eval on qwen3.5:4b.
+    #
+    # Must track the CPU limit in k8s apps/ollama-mini/deployment.yaml. There is no server
+    # env var for this — it is a per-request model option, so every caller must send it.
+    #
+    # Note: changing this value forces Ollama to reload the model (~30s), so it should be
+    # set once and left alone rather than tuned per request.
+    num_thread: int = 6
+
     # Declaring scribe honestly, with a contact address, is what Wikimedia's robot policy
     # asks for — and it empirically works better than spoofing a browser, which their edge
     # refuses with a 403 bot-policy notice. Keep the tool name and contact in place.
     user_agent: str = "scribe/0.1 (https://meklab.net; michael.ekstrom@me.com) python-httpx"
+
+    # Must match OLLAMA_CONTEXT_LENGTH on the server (32768 as of k8s tag v1.34.1). Ollama
+    # truncates over-length input SILENTLY, so scribe trims first and reports what it cut.
+    context_tokens: int = 32768
+    # Headroom for the prompt scaffolding and the generated summary itself.
+    response_reserve_tokens: int = 6000
 
 
 def load_settings() -> Settings:

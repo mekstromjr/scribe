@@ -1,14 +1,17 @@
-"""CLI for Phase 1: extraction only. No Slack, no vault writes."""
+"""scribe CLI. Extraction and note rendering; Slack and vault publishing land later."""
 
 from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from scribe.config import load_settings
 from scribe.extract import ExtractionError, extract
 from scribe.extract.pdf import has_text_layer
+from scribe.note import render, slugify
 from scribe.ollama import OllamaError, health
+from scribe.summarize import summarize
 
 
 def _cmd_extract(args: argparse.Namespace) -> int:
@@ -29,10 +32,40 @@ def _cmd_extract(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_note(args: argparse.Namespace) -> int:
+    """Extract -> summarize -> render the vault note. Prints the note; does not publish."""
+    settings = load_settings()
+    try:
+        doc = extract(settings, args.target)
+        print(f"# extracted: {doc.summary_line()}", file=sys.stderr)
+        summary = summarize(settings, doc)
+        print(f"# summarized in {summary.seconds:.1f}s", file=sys.stderr)
+    except (ExtractionError, OllamaError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if summary.truncated_chars:
+        print(
+            f"WARNING: {summary.truncated_chars} chars dropped to fit the context window — "
+            "the summary covers only the retained portion",
+            file=sys.stderr,
+        )
+
+    body = render(doc, summary, model=settings.text_model)
+    filename = f"{slugify(summary.title)}.md"
+    if args.out_dir:
+        target = Path(args.out_dir).expanduser() / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body)
+        print(f"wrote {target}")
+    else:
+        print(f"# filename: {filename}", file=sys.stderr)
+        print(body)
+    return 0
+
+
 def _cmd_probe(args: argparse.Namespace) -> int:
     """Classify a PDF without spending any CPU on OCR."""
-    from pathlib import Path
-
     path = Path(args.target).expanduser()
     if has_text_layer(path):
         print(f"{path.name}: has a text layer — extraction will be instant, no OCR")
@@ -73,6 +106,11 @@ def main() -> int:
         "--per-page", action="store_true", help="report the method and timing for each page"
     )
     p_extract.set_defaults(func=_cmd_extract)
+
+    p_note = sub.add_parser("note", help="extract, summarize, and render a vault note")
+    p_note.add_argument("target")
+    p_note.add_argument("--out-dir", help="write the note here instead of stdout")
+    p_note.set_defaults(func=_cmd_note)
 
     p_probe = sub.add_parser("probe", help="check whether a PDF has a text layer (no OCR)")
     p_probe.add_argument("target")

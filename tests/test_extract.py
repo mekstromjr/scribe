@@ -91,3 +91,38 @@ class TestTextLayerDetection:
         from scribe.extract.pdf import has_text_layer
 
         assert has_text_layer(SAMPLES / "mediterranean-potato-salad.pdf") is False
+
+
+class TestDemoteHeadings:
+    """The model writes its own heading hierarchy, which would otherwise collide with the
+    note's `# Title` / `## Summary` structure and flatten Obsidian's outline."""
+
+    def test_shifts_block_so_shallowest_becomes_h3(self):
+        from scribe.note import demote_headings
+
+        md = "# Top\n\ntext\n\n## Sub\n\n### Deep\n"
+        assert demote_headings(md) == "### Top\n\ntext\n\n#### Sub\n\n##### Deep\n"
+
+    def test_preserves_relative_nesting(self):
+        from scribe.note import demote_headings
+
+        md = "## A\n\n#### B\n"
+        # A shifts 2->3, so B shifts by the same offset (4->5) rather than being clamped.
+        assert demote_headings(md) == "### A\n\n##### B\n"
+
+    def test_noop_when_already_deep_enough(self):
+        from scribe.note import demote_headings
+
+        md = "### Already fine\n"
+        assert demote_headings(md) == md
+
+    def test_clamps_at_h6(self):
+        from scribe.note import demote_headings
+
+        assert demote_headings("# a\n\n###### deep\n") == "### a\n\n###### deep\n"
+
+    def test_ignores_hash_not_at_line_start(self):
+        from scribe.note import demote_headings
+
+        md = "# Real\n\nsee issue #42 inline\n"
+        assert "#42" in demote_headings(md)
