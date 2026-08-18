@@ -1,0 +1,44 @@
+{
+  "display_information": {
+    "name": "scribe",
+    "description": "Send a link, PDF, or image; get a summary in thread and a full note in your Obsidian vault.",
+    "background_color": "#2c3e50"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "scribe",
+      "always_online": true
+    },
+    "app_home": {
+      "home_tab_enabled": false,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "chat:write",
+        "files:read",
+        "im:history",
+        "im:read",
+        "im:write"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "app_mention",
+        "message.im"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": false
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}

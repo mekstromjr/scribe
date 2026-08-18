@@ -126,3 +126,51 @@ class TestDemoteHeadings:
 
         md = "# Real\n\nsee issue #42 inline\n"
         assert "#42" in demote_headings(md)
+
+
+class TestNoteTitle:
+    """The source's own title wins: the name you go looking for later is the one the
+    article actually had, not the model's paraphrase of it."""
+
+    def test_prefers_the_source_title(self):
+        from scribe.note import note_title
+        from scribe.summarize import Summary
+
+        doc = Document(source="https://x", kind="link", title="Machines of Loving Grace")
+        s = Summary(title="A Vision for AI's Positive Impact", tldr="", summary="")
+        assert note_title(doc, s) == "Machines of Loving Grace"
+
+    def test_falls_back_to_the_model_when_source_has_none(self):
+        from scribe.note import note_title
+        from scribe.summarize import Summary
+
+        doc = Document(source="https://x", kind="link", title=None)
+        s = Summary(title="Model Title", tldr="", summary="")
+        assert note_title(doc, s) == "Model Title"
+
+    def test_treats_a_blank_source_title_as_absent(self):
+        from scribe.note import note_title
+        from scribe.summarize import Summary
+
+        doc = Document(source="https://x", kind="link", title="   ")
+        s = Summary(title="Model Title", tldr="", summary="")
+        assert note_title(doc, s) == "Model Title"
+
+
+class TestObsidianUri:
+    def test_builds_a_deep_link(self):
+        from scribe.note import obsidian_uri
+
+        uri = obsidian_uri("MekVault", "+/My Note.md")
+        assert uri == "obsidian://open?vault=MekVault&file=%2B%2FMy%20Note"
+
+    def test_drops_the_md_suffix(self):
+        """Obsidian resolves by note name; leaving .md on makes the link miss."""
+        from scribe.note import obsidian_uri
+
+        assert obsidian_uri("V", "+/N.md").endswith("%2FN")
+
+    def test_encodes_vault_names_with_spaces(self):
+        from scribe.note import obsidian_uri
+
+        assert "vault=My%20Vault" in obsidian_uri("My Vault", "+/N.md")

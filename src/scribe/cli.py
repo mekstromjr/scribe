@@ -1,4 +1,4 @@
-"""scribe CLI. Extraction and note rendering; Slack and vault publishing land later."""
+"""scribe CLI: extract, summarize, publish to the vault, and run the Slack bot."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 from scribe.config import load_settings
 from scribe.extract import ExtractionError, extract
 from scribe.extract.pdf import has_text_layer
-from scribe.note import render, slugify
+from scribe.note import note_title, render, slugify
 from scribe.ollama import OllamaError, health
 from scribe.summarize import summarize
 from scribe.vault import VaultError, publish, resolve_attachment
@@ -53,7 +53,7 @@ def _cmd_note(args: argparse.Namespace) -> int:
         )
 
     body = render(doc, summary, model=settings.text_model)
-    filename = f"{slugify(summary.title)}.md"
+    filename = f"{slugify(note_title(doc, summary))}.md"
     if args.out_dir:
         target = Path(args.out_dir).expanduser() / filename
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -107,7 +107,7 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         result = publish(
             settings,
             note_body=body,
-            note_stem=slugify(summary.title),
+            note_stem=slugify(note_title(doc, summary)),
             attachment=source_file,
             attachment_path=attachment_path,
         )
@@ -120,6 +120,13 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         print(f"attachment: {result['attachment']}")
     print(f"\nTL;DR — {summary.tldr}")
     return 0
+
+
+def _cmd_serve(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Run the Slack Socket Mode bot. Blocks."""
+    from scribe.slack_app import run
+
+    return run()
 
 
 def _cmd_probe(args: argparse.Namespace) -> int:
@@ -173,6 +180,9 @@ def main() -> int:
     p_publish = sub.add_parser("publish", help="extract, summarize, and commit to the vault")
     p_publish.add_argument("target")
     p_publish.set_defaults(func=_cmd_publish)
+
+    p_serve = sub.add_parser("serve", help="run the Slack bot (Socket Mode)")
+    p_serve.set_defaults(func=_cmd_serve)
 
     p_probe = sub.add_parser("probe", help="check whether a PDF has a text layer (no OCR)")
     p_probe.add_argument("target")

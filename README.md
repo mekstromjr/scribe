@@ -6,8 +6,9 @@ the Obsidian vault with a thorough summary plus the complete extracted text.
 Backed by [`ollama-mini`](https://gitlab.meklab.net/meklab/k8s/-/tree/main/apps/ollama-mini)
 (CPU-only Ollama in the `infra` namespace).
 
-**Status: Phase 3 — extraction, summarization, note rendering, and vault publishing.**
-CLI only; Slack comes in Phase 4.
+**Status: Phase 4 — Slack Socket Mode bot written, not yet verified against live Slack**
+(needs the app tokens; see [SLACK_SETUP.md](SLACK_SETUP.md)). Everything below Slack —
+extraction, summarization, note rendering, vault publishing — is working and verified.
 
 ## The core design decision: extract before OCR
 
@@ -51,6 +52,9 @@ scribe note https://example.com/article --out-dir ~/notes
 # ...and commit it to the Obsidian vault
 scribe publish deck.pdf
 scribe publish https://example.com/article
+
+# Run the Slack bot (blocks; needs the two Slack tokens)
+scribe serve
 ```
 
 ### Running against the cluster from a laptop
@@ -129,6 +133,33 @@ control; the cluster cannot write iCloud, so scribe commits and the plugin pulls
 first, so a broken remote leaves the repo looking healthy while the server silently falls
 behind — that failure went unnoticed for three months.
 
+## Slack
+
+DM the bot, or @-mention it, with a link or an attached PDF/image. It acknowledges in
+thread immediately, then replies with the TL;DR and the note name when the work is done.
+
+**Socket Mode, not the Events API** — Slack cannot reach this network (the cluster is
+behind Tailscale CGNAT with no public ingress), so scribe opens an *outbound* WebSocket
+instead. A useful consequence: scribe needs no Service, no Ingress and no certificate,
+because nothing ever connects *to* it.
+
+The Slack CLI is **not usable** for setup here — `slack login` returns "This workspace is
+not eligible for the next generation Slack platform." That gate is about Slack's
+Deno-hosted platform, which needs a paid plan; Socket Mode and bot tokens are free.
+[SLACK_SETUP.md](SLACK_SETUP.md) covers the web-UI path using `manifest.json`.
+
+Two design points:
+
+- **Work is serialized behind one worker.** ollama-mini runs `OLLAMA_NUM_PARALLEL=1` on
+  CPU, so concurrent documents would not finish sooner — they would thrash a shared
+  bottleneck and slow everything. The ack says how many jobs are ahead of you.
+- **The immediate ack is not cosmetic.** A document takes minutes; without it there is no
+  signal anything is happening.
+
+Scopes are minimal by design: `im:history` plus `app_mentions:read` means scribe sees only
+DMs sent to it and messages that @-mention it. There is no `channels:history`, so it
+cannot read channel traffic it was not addressed in.
+
 ## Reused from recipe-pipeline
 
 `src/scribe/ollama.py` and the PDF rendering in `src/scribe/extract/pdf.py` are adapted from
@@ -159,8 +190,9 @@ All settings are env-overridable with the `SCRIBE_` prefix (see `src/scribe/conf
 | `SCRIBE_VAULT_NOTES_DIR` | `+` | The vault's inbox convention |
 | `SCRIBE_VAULT_FILES_DIR` | `Misc/Files` | Where attachments land |
 | `SCRIBE_MAX_ATTACHMENT_BYTES` | `10485760` | Above this the note publishes without the source |
+| `SCRIBE_SLACK_BOT_TOKEN` | *(none)* | `xoxb-` from installing the app |
+| `SCRIBE_SLACK_APP_TOKEN` | *(none)* | `xapp-` with `connections:write`, for Socket Mode |
 
 ## Roadmap
 
-- **Phase 4** — Slack Socket Mode (outbound WebSocket; Slack cannot reach the tailnet)
 - **Phase 5** — deploy to `infra`, Standard tier, Deployment only (no Service/Ingress)
