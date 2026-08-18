@@ -18,6 +18,15 @@ way.
 4. Paste the contents of [`manifest.json`](manifest.json)
 5. Create
 
+## 1a. If DMs show "Sending messages to this app has been turned off"
+
+The manifest now sets `features.app_home.messages_tab_read_only_enabled: false`, but an
+app created before that was added defaults the Messages tab to **read-only** — the DM box
+is disabled and the bot can never be reached.
+
+Fix without recreating the app: **App Home** -> *Show Tabs* -> **Messages Tab** -> enable
+it and check **"Allow users to send Slash commands and messages from the messages tab"**.
+
 ## 2. Install it and collect the two tokens
 
 Socket Mode needs **two** tokens, and the manifest can only produce the first:

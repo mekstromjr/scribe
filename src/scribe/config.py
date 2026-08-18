@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -92,7 +93,15 @@ class Settings(BaseSettings):
     # token with connections:write minted under Basic Information. See SLACK_SETUP.md —
     # the app-level token cannot be created from a manifest.
     slack_bot_token: str = ""
-    slack_app_token: str = ""
+    # Slack's own docs call this the "app-level token"; it is stored locally as
+    # SCRIBE_SLACK_WRITE_TOKEN (after its connections:write scope). Accept both names so
+    # neither the existing environment nor the Slack-standard term has to give way.
+    slack_app_token: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "SCRIBE_SLACK_APP_TOKEN", "SCRIBE_SLACK_WRITE_TOKEN"
+        ),
+    )
 
 
 def load_settings() -> Settings:
