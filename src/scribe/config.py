@@ -84,6 +84,11 @@ class Settings(BaseSettings):
     vault_notes_dir: str = "+"
     vault_files_dir: str = "Misc/Files"
 
+    # Obsidian vault NAME as it appears in the app (the iCloud folder is
+    # .../iCloud~md~obsidian/Documents/MekVault). Used to build obsidian:// deep links so
+    # a Slack reply opens the note directly on phone or laptop.
+    obsidian_vault_name: str = "MekVault"
+
     # The vault repo syncs to every device, so a large binary is a lasting cost. Above
     # this, the source file is skipped and the note simply has no attachment link.
     max_attachment_bytes: int = 10 * 1024 * 1024
@@ -92,6 +97,11 @@ class Settings(BaseSettings):
     # Socket Mode needs BOTH: a bot token from installing the app, and an app-level
     # token with connections:write minted under Basic Information. See SLACK_SETUP.md —
     # the app-level token cannot be created from a manifest.
+    # Durable spool for pending Slack jobs, so a restart resumes rather than silently
+    # dropping queued work. In-cluster this should be a PVC mount — an emptyDir would
+    # defeat the point.
+    spool_dir: str = "~/.local/state/scribe/queue"
+
     slack_bot_token: str = ""
     # Slack's own docs call this the "app-level token"; it is stored locally as
     # SCRIBE_SLACK_WRITE_TOKEN (after its connections:write scope). Accept both names so

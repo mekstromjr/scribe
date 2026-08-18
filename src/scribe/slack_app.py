@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 import re
-import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -25,8 +24,9 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from scribe.config import Settings, load_settings
 from scribe.extract import ExtractionError, extract
-from scribe.note import render, slugify
+from scribe.note import note_title, obsidian_uri, render, slugify
 from scribe.ollama import OllamaError
+from scribe.queue import Job, complete, enqueue, restore, spool
 from scribe.summarize import summarize
 from scribe.vault import VaultError, publish, resolve_attachment
 
@@ -45,7 +45,7 @@ def first_url(text: str) -> str | None:
     return m.group(0).rstrip(">") if m else None
 
 
-def download_file(settings: Settings, file_info: dict, dest_dir: Path) -> Path:
+def download_file(settings: Settings, file_info: dict, dest: Path) -> Path:
     """Fetch a Slack upload.
 
     The bot token must go in an Authorization header — `url_private_download` returns an
@@ -65,16 +65,16 @@ def download_file(settings: Settings, file_info: dict, dest_dir: Path) -> Path:
         raise ExtractionError(
             f"Slack returned HTML for {name} — the bot token is missing or lacks files:read"
         )
-    path = dest_dir / name
-    path.write_bytes(resp.content)
-    return path
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(resp.content)
+    return dest
 
 
-def _process(settings: Settings, client, channel: str, thread_ts: str, target: str,
-             local_file: Path | None) -> None:
+def _process(settings: Settings, client, job: Job) -> None:
     """Run the pipeline and reply in-thread. Never raises — failures are reported to Slack."""
+    local_file = Path(job.attachment) if job.attachment else None
     try:
-        doc = extract(settings, target)
+        doc = extract(settings, job.target)
         summary = summarize(settings, doc)
 
         attachment_path = resolve_attachment(settings, local_file) if local_file else None
@@ -82,38 +82,54 @@ def _process(settings: Settings, client, channel: str, thread_ts: str, target: s
         result = publish(
             settings,
             note_body=body,
-            note_stem=slugify(summary.title),
+            note_stem=slugify(note_title(doc, summary)),
             attachment=local_file,
             attachment_path=attachment_path,
         )
 
         note_name = Path(result["note"]).stem
+        uri = obsidian_uri(settings.obsidian_vault_name, result["note"])
         lines = [
-            f"*{summary.title}*",
+            f"*{note_title(doc, summary)}*",
+            # The source is repeated in the body, not just implied by the thread: Slack
+            # surfaces reply text in notifications, search and the Threads pane, where the
+            # parent message is not visible. With several items queued, a model-written
+            # title alone does not reliably identify which one this is.
+            job.source_label,
             "",
             summary.tldr,
             "",
-            f"Saved to your vault as `{note_name}`",
+            # Deep link rather than just the name: tapping it opens the note directly
+            # in Obsidian on phone or laptop, which is the whole point of a read-later
+            # queue. Slack renders <uri|label>.
+            f"Saved to your vault: <{uri}|{note_name}>",
         ]
         if summary.truncated_chars:
             lines.append(
                 f"_Note: {summary.truncated_chars} characters were trimmed to fit the "
                 f"model's context, so the summary covers only part of the source._"
             )
-        client.chat_postMessage(channel=channel, thread_ts=thread_ts, text="\n".join(lines))
+        client.chat_postMessage(
+            channel=job.channel, thread_ts=job.thread_ts, text="\n".join(lines)
+        )
     except (ExtractionError, OllamaError, VaultError) as exc:
         client.chat_postMessage(
-            channel=channel, thread_ts=thread_ts, text=f"Sorry — that failed: {exc}"
+            channel=job.channel,
+            thread_ts=job.thread_ts,
+            text=f"Sorry — {job.source_label} failed: {exc}",
         )
     except Exception:
         # A crash here must not kill the worker thread and silently stop the queue.
-        log.exception("unexpected failure processing %s", target)
+        log.exception("unexpected failure processing %s", job.target)
         client.chat_postMessage(
-            channel=channel, thread_ts=thread_ts, text="Sorry — that failed unexpectedly."
+            channel=job.channel,
+            thread_ts=job.thread_ts,
+            text=f"Sorry — {job.source_label} failed unexpectedly.",
         )
     finally:
-        if local_file is not None:
-            local_file.unlink(missing_ok=True)
+        # Clears both the spool record and the downloaded attachment. A job that failed is
+        # still done: retrying it forever would block everything behind it.
+        complete(settings, job)
 
 
 class _Pending:
@@ -138,9 +154,16 @@ class _Pending:
             self._n = max(0, self._n - 1)
 
 
+def _submit(settings: Settings, pool: ThreadPoolExecutor, pending: _Pending, client,
+            job: Job) -> None:
+    fut = pool.submit(_process, settings, client, job)
+    fut.add_done_callback(lambda _f: pending.done())
+
+
 def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
     app = App(token=settings.slack_bot_token)
     # One worker: the model server is the bottleneck and handles one request at a time.
+    # Parallel documents would not finish sooner, only thrash a shared bottleneck.
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="scribe")
     pending = _Pending()
 
@@ -153,20 +176,27 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
         # Reply in a thread on the original message so the channel stays readable.
         thread_ts = event.get("thread_ts") or event["ts"]
 
-        tmpdir = Path(tempfile.mkdtemp(prefix="scribe-"))
-        local_file: Path | None = None
         target: str | None = None
+        source_label: str | None = None
+        attachment: str | None = None
 
         files = event.get("files") or []
         if files:
+            name = files[0].get("name") or "upload"
+            # Staged in the spool, not a tempdir: the bytes must outlive a restart or the
+            # resumed job would have nothing to read.
+            dest = spool(settings) / f"{Job.new(channel, thread_ts, '', '').id}-{name}"
             try:
-                local_file = download_file(settings, files[0], tmpdir)
-                target = str(local_file)
+                downloaded = download_file(settings, files[0], dest)
             except Exception as exc:
                 say(text=f"Couldn't download that file: {exc}", thread_ts=thread_ts)
                 return
+            target = str(downloaded)
+            attachment = str(downloaded)
+            source_label = f"`{name}`"
         else:
             target = first_url(event.get("text", ""))
+            source_label = target
 
         if not target:
             say(
@@ -175,17 +205,20 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
             )
             return
 
+        job = Job.new(channel, thread_ts, target, source_label or target)
+        job.attachment = attachment
+        enqueue(settings, job)
+
         # Acknowledge immediately. The pipeline takes minutes on CPU, so without this the
-        # user has no signal that anything is happening.
+        # user has no signal anything is happening. The source is echoed so the thread
+        # reads coherently top to bottom.
         ahead = pending.add()
-        note = f" (queued behind {ahead} other job(s))" if ahead else ""
+        queued = f" It is queued behind {ahead} other item(s)." if ahead else ""
         say(
-            text=f"On it — reading and summarizing{note}. This takes a few minutes.",
+            text=f"On it — {job.source_label}. This takes a few minutes.{queued}",
             thread_ts=thread_ts,
         )
-
-        fut = pool.submit(_process, settings, client, channel, thread_ts, target, local_file)
-        fut.add_done_callback(lambda _f: pending.done())
+        _submit(settings, pool, pending, client, job)
 
     @app.event("app_mention")
     def on_mention(event, say, client):
@@ -197,6 +230,22 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
         # were not addressed in.
         if event.get("channel_type") == "im":
             handle(event, say, client)
+
+    # Resume anything the previous run did not finish, in the order it arrived. Each
+    # thread is told explicitly — a silently resumed job is indistinguishable from a
+    # stalled one, which is the confusion the spool exists to prevent.
+    for job in restore(settings):
+        log.info("resuming queued job %s (%s)", job.id, job.source_label)
+        pending.add()
+        try:
+            app.client.chat_postMessage(
+                channel=job.channel,
+                thread_ts=job.thread_ts,
+                text=f"Picking this back up after a restart — {job.source_label}.",
+            )
+        except Exception:
+            log.exception("could not notify resume for %s", job.id)
+        _submit(settings, pool, pending, app.client, job)
 
     return app, pool
 

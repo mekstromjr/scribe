@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from urllib.parse import quote
 
 from scribe.document import Document, Method
 from scribe.summarize import Summary
@@ -84,6 +85,27 @@ def _provenance(doc: Document, summary: Summary, model: str) -> str:
     return " · ".join(parts)
 
 
+def note_title(doc: Document, summary: Summary) -> str:
+    """The source's own title wins over the model's.
+
+    The model writes a reasonable title, but it paraphrases — and the name you go looking
+    for later is the one the article actually had. For files the source title is the
+    filename stem, which is likewise what you would search for. Falls back to the model
+    only when the source has no usable title (some pages expose none).
+    """
+    return (doc.title or "").strip() or summary.title
+
+
+def obsidian_uri(vault_name: str, note_path: str) -> str:
+    """Deep link that opens the note in Obsidian on macOS or iOS.
+
+    The `.md` suffix is dropped: Obsidian resolves by note name, and leaving it on makes
+    the link miss.
+    """
+    path = note_path[:-3] if note_path.endswith(".md") else note_path
+    return f"obsidian://open?vault={quote(vault_name, safe='')}&file={quote(path, safe='')}"
+
+
 def render(
     doc: Document,
     summary: Summary,
@@ -111,7 +133,7 @@ def render(
             f"Sources: {doc.source}",
             f"type: {doc.kind}",
             "---",
-            f"# {summary.title}",
+            f"# {note_title(doc, summary)}",
             "",
             f"> Source: {source_line}",
             f"> {_provenance(doc, summary, model)}",

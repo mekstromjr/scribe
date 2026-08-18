@@ -9,7 +9,7 @@ from pathlib import Path
 from scribe.config import load_settings
 from scribe.extract import ExtractionError, extract
 from scribe.extract.pdf import has_text_layer
-from scribe.note import render, slugify
+from scribe.note import note_title, render, slugify
 from scribe.ollama import OllamaError, health
 from scribe.summarize import summarize
 from scribe.vault import VaultError, publish, resolve_attachment
@@ -53,7 +53,7 @@ def _cmd_note(args: argparse.Namespace) -> int:
         )
 
     body = render(doc, summary, model=settings.text_model)
-    filename = f"{slugify(summary.title)}.md"
+    filename = f"{slugify(note_title(doc, summary))}.md"
     if args.out_dir:
         target = Path(args.out_dir).expanduser() / filename
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -107,7 +107,7 @@ def _cmd_publish(args: argparse.Namespace) -> int:
         result = publish(
             settings,
             note_body=body,
-            note_stem=slugify(summary.title),
+            note_stem=slugify(note_title(doc, summary)),
             attachment=source_file,
             attachment_path=attachment_path,
         )
