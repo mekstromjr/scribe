@@ -84,14 +84,24 @@ def _provenance(doc: Document, summary: Summary, model: str) -> str:
     return " · ".join(parts)
 
 
-def render(doc: Document, summary: Summary, *, model: str, created: date | None = None) -> str:
+def render(
+    doc: Document,
+    summary: Summary,
+    *,
+    model: str,
+    created: date | None = None,
+    attachment_link: str | None = None,
+) -> str:
     created = created or date.today()
     tags = ["aigen", "scribe", *summary.tags]
-    source_line = (
-        f"[{doc.title or doc.source}]({doc.source})"
-        if doc.kind == "link"
-        else f"`{doc.source}`"
-    )
+    if doc.kind == "link":
+        source_line = f"[{doc.title or doc.source}]({doc.source})"
+    elif attachment_link:
+        # Wikilink to the copy committed alongside this note, so the original is one
+        # click away rather than only named.
+        source_line = f"[[{attachment_link}]]"
+    else:
+        source_line = f"`{doc.source}`"
 
     return "\n".join(
         [

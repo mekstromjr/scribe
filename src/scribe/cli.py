@@ -12,6 +12,7 @@ from scribe.extract.pdf import has_text_layer
 from scribe.note import render, slugify
 from scribe.ollama import OllamaError, health
 from scribe.summarize import summarize
+from scribe.vault import VaultError, publish, resolve_attachment
 
 
 def _cmd_extract(args: argparse.Namespace) -> int:
@@ -64,6 +65,63 @@ def _cmd_note(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_publish(args: argparse.Namespace) -> int:
+    """Extract -> summarize -> render -> commit to the Obsidian vault."""
+    settings = load_settings()
+    try:
+        doc = extract(settings, args.target)
+        print(f"# extracted: {doc.summary_line()}", file=sys.stderr)
+        summary = summarize(settings, doc)
+        print(f"# summarized in {summary.seconds:.1f}s", file=sys.stderr)
+    except (ExtractionError, OllamaError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if summary.truncated_chars:
+        print(
+            f"WARNING: {summary.truncated_chars} chars dropped to fit the context window",
+            file=sys.stderr,
+        )
+
+    # Local files travel with the note so the original is one click away in the vault.
+    # Links do not — the URL is already in the frontmatter.
+    source_file = None
+    if doc.kind in {"pdf", "image"}:
+        candidate = Path(args.target).expanduser()
+        if candidate.is_file():
+            source_file = candidate
+
+    try:
+        # Resolved BEFORE rendering: the note wikilinks the attachment by its final
+        # name, which is only known after collision resolution.
+        attachment_path = resolve_attachment(settings, source_file) if source_file else None
+        if source_file and attachment_path is None:
+            print(
+                f"note: {source_file.name} exceeds the attachment size cap — "
+                "committing the note without it",
+                file=sys.stderr,
+            )
+        body = render(
+            doc, summary, model=settings.text_model, attachment_link=attachment_path
+        )
+        result = publish(
+            settings,
+            note_body=body,
+            note_stem=slugify(summary.title),
+            attachment=source_file,
+            attachment_path=attachment_path,
+        )
+    except VaultError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"published: {result['note']}")
+    if result["attachment"]:
+        print(f"attachment: {result['attachment']}")
+    print(f"\nTL;DR — {summary.tldr}")
+    return 0
+
+
 def _cmd_probe(args: argparse.Namespace) -> int:
     """Classify a PDF without spending any CPU on OCR."""
     path = Path(args.target).expanduser()
@@ -111,6 +169,10 @@ def main() -> int:
     p_note.add_argument("target")
     p_note.add_argument("--out-dir", help="write the note here instead of stdout")
     p_note.set_defaults(func=_cmd_note)
+
+    p_publish = sub.add_parser("publish", help="extract, summarize, and commit to the vault")
+    p_publish.add_argument("target")
+    p_publish.set_defaults(func=_cmd_publish)
 
     p_probe = sub.add_parser("probe", help="check whether a PDF has a text layer (no OCR)")
     p_probe.add_argument("target")
