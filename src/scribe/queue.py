@@ -32,6 +32,10 @@ class Job:
     target: str
     source_label: str
     attachment: str | None = None
+    # The ORIGINAL upload name. The spooled file is prefixed with the job id to keep
+    # concurrent uploads from colliding on disk, but the vault must get the clean name --
+    # otherwise notes link attachments called "1787099069943412312-1cc31a4e-Syllabus.pdf".
+    attachment_name: str | None = None
 
     @staticmethod
     def new(channel: str, thread_ts: str, target: str, source_label: str) -> Job:

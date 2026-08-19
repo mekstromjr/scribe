@@ -61,3 +61,29 @@ class TestTokenGuard:
     def test_missing_token_is_a_clear_error(self):
         with pytest.raises(VaultError, match="SCRIBE_GITLAB_TOKEN"):
             vault._headers(Settings(gitlab_token=""))
+
+
+class TestAttachmentNaming:
+    """The spooled file carries a job-id prefix so concurrent uploads cannot collide on
+    disk. That prefix must NOT reach the vault, or notes link attachments called
+    '1787099069943412312-1cc31a4e-Syllabus.pdf'."""
+
+    def test_uses_the_original_name_not_the_spool_path(self, settings, monkeypatch, tmp_path):
+        monkeypatch.setattr(vault, "file_exists", lambda s, p: False)
+        spooled = tmp_path / "1787099069943412312-1cc31a4e-1003 Fall 2026 Syllabus.pdf"
+        spooled.write_bytes(b"x" * 100)
+        got = resolve_attachment(settings, spooled, "1003 Fall 2026 Syllabus.pdf")
+        assert got == "Misc/Files/1003 Fall 2026 Syllabus.pdf"
+
+    def test_falls_back_to_the_path_when_no_name_given(self, settings, monkeypatch, tmp_path):
+        monkeypatch.setattr(vault, "file_exists", lambda s, p: False)
+        f = tmp_path / "plain.pdf"
+        f.write_bytes(b"x")
+        assert resolve_attachment(settings, f) == "Misc/Files/plain.pdf"
+
+    def test_size_cap_still_applies_with_a_name(self, settings, monkeypatch, tmp_path):
+        monkeypatch.setattr(vault, "file_exists", lambda s, p: False)
+        f = tmp_path / "job-id-big.pdf"
+        f.write_bytes(b"x" * 2048)
+        settings.max_attachment_bytes = 1024
+        assert resolve_attachment(settings, f, "big.pdf") is None
