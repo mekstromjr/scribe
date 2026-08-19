@@ -67,7 +67,9 @@ def unique_path(settings: Settings, folder: str, stem: str, suffix: str = ".md")
     raise VaultError(f"could not find a free filename for {stem} after 99 attempts")
 
 
-def resolve_attachment(settings: Settings, attachment: Path) -> str | None:
+def resolve_attachment(
+    settings: Settings, attachment: Path, name: str | None = None
+) -> str | None:
     """Pick the vault path for a source file, or None if it is too large to commit.
 
     Called BEFORE rendering so the note can wikilink the attachment by its final name —
@@ -76,7 +78,10 @@ def resolve_attachment(settings: Settings, attachment: Path) -> str | None:
     """
     if attachment.stat().st_size > settings.max_attachment_bytes:
         return None
-    return unique_path(settings, settings.vault_files_dir, attachment.stem, attachment.suffix)
+    # `name` is the original upload name; the on-disk path carries a job-id prefix that
+    # must not leak into the vault.
+    display = Path(name) if name else attachment
+    return unique_path(settings, settings.vault_files_dir, display.stem, display.suffix)
 
 
 def publish(

@@ -87,7 +87,11 @@ def _process(settings: Settings, client, job: Job) -> None:
         doc = extract(settings, job.target)
         summary = summarize(settings, doc)
 
-        attachment_path = resolve_attachment(settings, local_file) if local_file else None
+        attachment_path = (
+            resolve_attachment(settings, local_file, job.attachment_name)
+            if local_file
+            else None
+        )
         body = render(doc, summary, model=settings.text_model, attachment_link=attachment_path)
         result = publish(
             settings,
@@ -199,6 +203,7 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
         target: str | None = None
         source_label: str | None = None
         attachment: str | None = None
+        attachment_name: str | None = None
 
         files = event.get("files") or []
         if files:
@@ -213,6 +218,7 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
                 return
             target = str(downloaded)
             attachment = str(downloaded)
+            attachment_name = name
             source_label = f"`{name}`"
         else:
             target = first_url(event.get("text", ""))
@@ -229,6 +235,7 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
 
         job = Job.new(channel, thread_ts, target, source_label or target)
         job.attachment = attachment
+        job.attachment_name = attachment_name
         enqueue(settings, job)
 
         # Acknowledge immediately. The pipeline takes minutes on CPU, so without this the
