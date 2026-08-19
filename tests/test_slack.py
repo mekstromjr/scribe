@@ -110,3 +110,30 @@ class TestRetryClassification:
         job.attempts = 2
         enqueue(settings, job)
         assert restore(settings)[0].attempts == 2
+
+
+class TestSpooledNameDoesNotLeak:
+    """The spooled file carries a job-id prefix for on-disk uniqueness. It must not reach
+    the note's title, H1, or Sources frontmatter -- a note called
+    '1787110665559937147-a2779432-Syllabus' is unfindable."""
+
+    def test_document_title_uses_the_original_upload_name(self):
+        from pathlib import Path
+
+        from scribe.document import Document
+        from scribe.note import note_title
+        from scribe.summarize import Summary
+
+        doc = Document(
+            source="1787110665559937147-a2779432-Syllabus-F26-v0-1.pdf",
+            kind="pdf",
+            title="1787110665559937147-a2779432-Syllabus-F26-v0-1",
+        )
+        # What _process now does when the job carries an original name.
+        original = "Syllabus-F26-v0-1.pdf"
+        doc.source = original
+        doc.title = Path(original).stem
+
+        s = Summary(title="Model Written Title", tldr="", summary="")
+        assert note_title(doc, s) == "Syllabus-F26-v0-1"
+        assert doc.source == "Syllabus-F26-v0-1.pdf"

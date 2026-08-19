@@ -85,6 +85,13 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None) ->
     local_file = Path(job.attachment) if job.attachment else None
     try:
         doc = extract(settings, job.target)
+        if job.attachment_name:
+            # The extractors derive title/source from the file PATH, which for an upload is
+            # the SPOOLED name carrying a job-id prefix (kept so concurrent uploads cannot
+            # collide on disk). Left alone that prefix becomes the note's title, its H1 and
+            # its Sources frontmatter -- e.g. "1787110665559937147-a2779432-Syllabus".
+            doc.source = job.attachment_name
+            doc.title = Path(job.attachment_name).stem
         summary = summarize(settings, doc)
 
         attachment_path = (
