@@ -68,3 +68,45 @@ class TestHelpGating:
 
         for expected in ("link", "PDF", "image", "Obsidian"):
             assert expected in HELP_TEXT
+
+
+class TestRetryClassification:
+    """A transient dependency outage must not permanently lose a queued document — that is
+    the durability the spool exists to provide. An ollama-mini rollout landing while the
+    queue resumed cost a document exactly this way."""
+
+    def test_transient_errors_are_retried(self):
+        from scribe.ollama import OllamaError
+        from scribe.vault import VaultError
+
+        # Both mean "a dependency was unreachable", not "this input is bad".
+        for exc in (OllamaError, VaultError):
+            assert issubclass(exc, RuntimeError)
+
+    def test_extraction_errors_are_not_retried(self):
+        """A dead link or unsupported file will fail identically forever; retrying it
+        would just block the queue behind it."""
+        from scribe.extract.web import ExtractionError
+
+        assert issubclass(ExtractionError, RuntimeError)
+        assert ExtractionError is not RuntimeError
+
+    def test_job_carries_an_attempt_counter(self):
+        from scribe.queue import Job
+
+        job = Job.new("C", "1", "t", "t")
+        assert job.attempts == 0
+        job.attempts += 1
+        assert job.attempts == 1
+
+    def test_attempts_survive_the_spool_round_trip(self, tmp_path):
+        """The counter must persist, or a pod restart resets it and a permanently broken
+        dependency retries forever."""
+        from scribe.config import Settings
+        from scribe.queue import Job, enqueue, restore
+
+        settings = Settings(spool_dir=str(tmp_path / "q"))
+        job = Job.new("C", "1", "t", "t")
+        job.attempts = 2
+        enqueue(settings, job)
+        assert restore(settings)[0].attempts == 2

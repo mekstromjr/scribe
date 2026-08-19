@@ -108,6 +108,11 @@ class Settings(BaseSettings):
     # defeat the point.
     spool_dir: str = "~/.local/state/scribe/queue"
 
+    # Attempts per job before giving up. Transient failures (ollama restarting, a
+    # network blip) must not permanently lose a queued document. Permanent failures --
+    # a dead link, an unsupported file type -- are not retried at all.
+    max_attempts: int = 3
+
     slack_bot_token: str = ""
     # Slack's own docs call this the "app-level token"; it is stored locally as
     # SCRIBE_SLACK_WRITE_TOKEN (after its connections:write scope). Accept both names so
