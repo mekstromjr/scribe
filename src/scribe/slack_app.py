@@ -80,7 +80,7 @@ def download_file(settings: Settings, file_info: dict, dest: Path) -> Path:
     return dest
 
 
-def _process(settings: Settings, client, job: Job) -> None:
+def _process(settings: Settings, client, job: Job, requeue=lambda _job: None) -> None:
     """Run the pipeline and reply in-thread. Never raises — failures are reported to Slack."""
     local_file = Path(job.attachment) if job.attachment else None
     try:
@@ -131,11 +131,34 @@ def _process(settings: Settings, client, job: Job) -> None:
         client.chat_postMessage(
             channel=job.channel, thread_ts=job.thread_ts, text="\n".join(lines)
         )
-    except (ExtractionError, OllamaError, VaultError) as exc:
+    except ExtractionError as exc:
+        # Bad input -- a dead link, an unsupported file. Retrying will not help.
+        log.warning("extraction failed for %s: %s", job.source_label, exc)
         client.chat_postMessage(
             channel=job.channel,
             thread_ts=job.thread_ts,
             text=f"Sorry — {job.source_label} failed: {exc}",
+        )
+    except (OllamaError, VaultError) as exc:
+        # Transient: the model server or GitLab was unreachable. Retry rather than drop
+        # the job. This is what lost a document when an ollama-mini rollout happened to
+        # land while the queue was resuming.
+        if job.attempts + 1 < settings.max_attempts:
+            job.attempts += 1
+            enqueue(settings, job)
+            log.warning(
+                "attempt %d/%d failed for %s (%s) — requeueing",
+                job.attempts, settings.max_attempts, job.source_label, exc,
+            )
+            requeue(job)
+            return
+        log.error("giving up on %s after %d attempts: %s", job.source_label,
+                  job.attempts + 1, exc)
+        client.chat_postMessage(
+            channel=job.channel,
+            thread_ts=job.thread_ts,
+            text=f"Sorry — {job.source_label} failed after "
+                 f"{job.attempts + 1} attempts: {exc}",
         )
     except Exception:
         # A crash here must not kill the worker thread and silently stop the queue.
@@ -175,7 +198,13 @@ class _Pending:
 
 def _submit(settings: Settings, pool: ThreadPoolExecutor, pending: _Pending, client,
             job: Job) -> None:
-    fut = pool.submit(_process, settings, client, job)
+    def requeue(j: Job) -> None:
+        # Back of the queue, not the front: a document whose dependency is down should not
+        # block everything behind it while it retries.
+        pending.add()
+        _submit(settings, pool, pending, client, j)
+
+    fut = pool.submit(_process, settings, client, job, requeue)
     fut.add_done_callback(lambda _f: pending.done())
 
 

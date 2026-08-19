@@ -36,6 +36,10 @@ class Job:
     # concurrent uploads from colliding on disk, but the vault must get the clean name --
     # otherwise notes link attachments called "1787099069943412312-1cc31a4e-Syllabus.pdf".
     attachment_name: str | None = None
+    # Retry counter. A transient dependency outage (ollama restarting, a network blip)
+    # must not permanently lose a queued document -- that is the exact durability the
+    # spool exists to provide.
+    attempts: int = 0
 
     @staticmethod
     def new(channel: str, thread_ts: str, target: str, source_label: str) -> Job:
