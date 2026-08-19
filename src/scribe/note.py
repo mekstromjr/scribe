@@ -80,6 +80,10 @@ def _provenance(doc: Document, summary: Summary, model: str) -> str:
     if skipped:
         # Surfaced in the note itself: a summary built from partial text should say so.
         parts.append(f"**{skipped} page(s) SKIPPED (OCR cap)**")
+    if summary.sections > 1:
+        # Say so plainly: a map-reduced summary is genuinely lower resolution than a
+        # single pass, because no one pass saw the whole argument.
+        parts.append(f"Summarized in {summary.sections} sections (map-reduce)")
     if summary.truncated_chars:
         parts.append(f"**{summary.truncated_chars} chars truncated to fit context**")
     return " · ".join(parts)

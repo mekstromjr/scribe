@@ -118,6 +118,11 @@ def _process(settings: Settings, client, job: Job) -> None:
             # queue. Slack renders <uri|label>.
             f"Saved to your vault: <{uri}|{note_name}>",
         ]
+        if summary.sections > 1:
+            lines.append(
+                f"_Long document — summarized in {summary.sections} sections, so this "
+                f"covers the whole thing but in less detail than usual._"
+            )
         if summary.truncated_chars:
             lines.append(
                 f"_Note: {summary.truncated_chars} characters were trimmed to fit the "
