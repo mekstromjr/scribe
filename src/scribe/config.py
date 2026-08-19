@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     # Headroom for the prompt scaffolding and the generated summary itself.
     response_reserve_tokens: int = 6000
 
+    # Chunk size for the map-reduce fallback (only used when a document would otherwise be
+    # truncated). ~24k chars is about 6k tokens: large enough that a chunk carries real
+    # context, small enough that the map step stays cheap. Generation dominates cost, so
+    # more chunks is more expensive than bigger chunks.
+    chunk_chars: int = 24000
+
     # --- Obsidian vault publishing -------------------------------------------------
     # mekadmin/mekvault. The vault syncs to Obsidian over iCloud with Obsidian Git as
     # version control; the cluster cannot write iCloud, so scribe commits here and the
