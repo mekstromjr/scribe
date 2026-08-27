@@ -1,0 +1,107 @@
+"""Estimate how long a document will take, before any model work starts.
+
+The ack is the only feedback a phone user gets for the next N minutes, so it should say
+when to check back. The estimate is a piecewise-linear fit over the two things that are
+knowable at enqueue time without paying for them: extracted character count and how many
+pages will need OCR.
+
+Everything here must stay CHEAP. Reading a PDF's text layer is milliseconds; OCR is
+minutes. The sizing pass mirrors extract_pdf's per-page min_page_chars decision without
+ever rendering a page, so the estimate covers exactly the pages the extractor will later
+send to the vision model. URLs are the one input we refuse to size (fetching the page to
+estimate it would do the extraction's network work twice) — they get the single-call
+constant, which is right for nearly every article.
+"""
+
+from __future__ import annotations
+
+import math
+import time
+from pathlib import Path
+
+import pypdfium2 as pdfium
+
+from scribe.config import Settings
+from scribe.extract import IMAGE_SUFFIXES
+
+# Rough text yield of one OCR'd page, for sizing the summarize step that follows the
+# OCR. Only the summarize cost scales with this, so precision barely matters: at the
+# measured per-char rate an error of 1,000 chars moves the estimate by ~20s.
+_OCR_CHARS_PER_PAGE = 1800
+
+
+def _budget_chars(settings: Settings) -> int:
+    # Mirrors summarize.py: the threshold where a document stops fitting one call and
+    # goes map-reduce. Keep the formulas identical or the estimate will pick the wrong
+    # branch for documents near the boundary.
+    return int((settings.context_tokens - settings.response_reserve_tokens) * 4)
+
+
+def _model_seconds(settings: Settings, chars: int) -> float:
+    """Cost of the summarize step alone for an extracted text of ``chars``."""
+    if chars <= _budget_chars(settings):
+        return settings.eta_single_base_seconds + chars * settings.eta_single_seconds_per_char
+    chunks = math.ceil(chars / settings.chunk_chars)
+    # +1 is the reduce call, which is a chunk-sized request in its own right.
+    return (chunks + 1) * settings.eta_chunk_seconds
+
+
+def _scan_pdf(settings: Settings, path: Path) -> tuple[int, int]:
+    """(text_layer_chars, pages_needing_ocr) — text layer only, never renders a page."""
+    chars = 0
+    ocr_pages = 0
+    pdf = pdfium.PdfDocument(str(path))
+    try:
+        for page in pdf:
+            textpage = page.get_textpage()
+            try:
+                text = textpage.get_text_range() or ""
+            finally:
+                textpage.close()
+            if len("".join(text.split())) >= settings.min_page_chars:
+                chars += len(text)
+            else:
+                ocr_pages += 1
+    finally:
+        pdf.close()
+    if settings.max_ocr_pages:
+        ocr_pages = min(ocr_pages, settings.max_ocr_pages)
+    return chars, ocr_pages
+
+
+def estimate_seconds(settings: Settings, target: str) -> int:
+    """Estimated processing seconds for one job, excluding queue wait.
+
+    Never raises: an unreadable file is the pipeline's error to report, not the ack's —
+    fall back to the single-call constant rather than blocking the acknowledgement.
+    """
+    try:
+        if target.startswith(("http://", "https://")):
+            chars = _budget_chars(settings)  # size unknown; assume a budget-full article
+            return round(_model_seconds(settings, chars))
+
+        path = Path(target).expanduser()
+        if path.suffix.lower() in IMAGE_SUFFIXES:
+            return round(
+                settings.eta_ocr_page_seconds
+                + _model_seconds(settings, _OCR_CHARS_PER_PAGE)
+            )
+
+        chars, ocr_pages = _scan_pdf(settings, path)
+        chars += ocr_pages * _OCR_CHARS_PER_PAGE
+        return round(ocr_pages * settings.eta_ocr_page_seconds + _model_seconds(settings, chars))
+    except Exception:
+        return round(_model_seconds(settings, _budget_chars(settings)))
+
+
+def eta_line(total_seconds: float) -> str:
+    """One Slack-formatted sentence: absolute time in the READER's timezone.
+
+    The <!date^...^{time}|fallback> token renders client-side, so the same message shows
+    4:32 PM to a viewer in Chicago and 2:32 PM to one in Seattle. The fallback is a
+    duration because clients that cannot render the token cannot be assumed to share a
+    timezone either.
+    """
+    done = int(time.time() + total_seconds)
+    minutes = max(1, round(total_seconds / 60))
+    return f"Estimated completion: <!date^{done}^{{time}}|in about {minutes} min>."
