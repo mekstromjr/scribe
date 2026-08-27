@@ -22,6 +22,8 @@ import httpx
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
+from scribe.abs import ABSError, upload
+from scribe.audio import produce_audio
 from scribe.config import Settings, load_settings
 from scribe.eta import estimate_seconds, eta_line
 from scribe.extract import ExtractionError, extract
@@ -29,7 +31,7 @@ from scribe.note import note_title, obsidian_uri, render, slugify
 from scribe.ollama import OllamaError
 from scribe.queue import Job, complete, enqueue, restore, spool
 from scribe.summarize import summarize
-from scribe.vault import VaultError, publish, resolve_attachment
+from scribe.vault import VaultError, append_listen_link, publish, resolve_attachment
 
 log = logging.getLogger("scribe.slack")
 
@@ -79,6 +81,60 @@ def download_file(settings: Settings, file_info: dict, dest: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(resp.content)
     return dest
+
+
+def _audio_stage(settings: Settings, client, job: Job, doc, summary, note_path: str) -> None:
+    """Synthesize, upload to Audiobookshelf, link the note, and post the m4b in-thread.
+
+    Never raises. Each delivery step degrades independently: an ABS outage still posts
+    the file to Slack, a Slack upload failure still leaves the ABS link, and a vault
+    hiccup loses only the note's listen line.
+    """
+    title = note_title(doc, summary)
+    author = doc.source if doc.kind == "link" else "scribe"
+    try:
+        result = produce_audio(settings, doc, summary, title=title, author=author)
+    except Exception as exc:
+        log.warning("audio synthesis failed for %s: %s", job.source_label, exc)
+        client.chat_postMessage(
+            channel=job.channel,
+            thread_ts=job.thread_ts,
+            text=f"_(No audio this time — synthesis failed: {exc})_",
+        )
+        return
+
+    with result.workdir:
+        minutes = result.audio_seconds / 60
+        abs_line = ""
+        try:
+            link = upload(settings, result.m4b, title=title, author=author)
+            abs_line = f"Listen in <{link}|Audiobookshelf> ({minutes:.0f} min)."
+        except ABSError as exc:
+            log.warning("ABS upload failed for %s: %s", job.source_label, exc)
+            abs_line = f"_(Audiobookshelf upload failed: {exc})_"
+        else:
+            try:
+                append_listen_link(settings, note_path, link)
+            except VaultError as exc:
+                log.warning("listen-link commit failed for %s: %s", note_path, exc)
+
+        try:
+            # files_upload_v2 needs files:write; posted into the same thread so the
+            # audio sits next to the TL;DR it belongs to.
+            client.files_upload_v2(
+                channel=job.channel,
+                thread_ts=job.thread_ts,
+                file=str(result.m4b),
+                filename=f"{title}.m4b",
+                title=title,
+                initial_comment=abs_line,
+            )
+        except Exception as exc:
+            log.warning("Slack audio upload failed for %s: %s", job.source_label, exc)
+            client.chat_postMessage(
+                channel=job.channel, thread_ts=job.thread_ts,
+                text=abs_line or f"_(Audio ready but both deliveries failed: {exc})_",
+            )
 
 
 def _process(settings: Settings, client, job: Job, requeue=lambda _job: None) -> None:
@@ -140,6 +196,11 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None) ->
         client.chat_postMessage(
             channel=job.channel, thread_ts=job.thread_ts, text="\n".join(lines)
         )
+        # Audio AFTER the note reply, and best-effort: at Kokoro's measured 1.6x
+        # realtime a long article synthesizes for tens of minutes, and a TTS failure
+        # must never fail (or requeue) a job whose note already published.
+        if settings.tts_enabled and settings.abs_token:
+            _audio_stage(settings, client, job, doc, summary, result["note"])
     except ExtractionError as exc:
         # Bad input -- a dead link, an unsupported file. Retrying will not help.
         log.warning("extraction failed for %s: %s", job.source_label, exc)

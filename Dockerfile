@@ -2,6 +2,12 @@
 # OUTBOUND, so nothing ever connects to this container.
 FROM python:3.12.11-slim-bookworm
 
+# ffmpeg: concatenates Kokoro's WAV segments and encodes the single AAC .m4b with
+# chapter markers (package.py). The only non-Python tool in the image.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=ghcr.io/astral-sh/uv:0.7.17 /uv /uvx /bin/
 
 WORKDIR /app
