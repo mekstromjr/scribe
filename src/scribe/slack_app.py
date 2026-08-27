@@ -23,6 +23,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from scribe.config import Settings, load_settings
+from scribe.eta import estimate_seconds, eta_line
 from scribe.extract import ExtractionError, extract
 from scribe.note import note_title, obsidian_uri, render, slugify
 from scribe.ollama import OllamaError
@@ -182,37 +183,45 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None) ->
 
 
 class _Pending:
-    """Counts queued jobs so the ack can say whether the user is waiting behind others.
+    """Counts queued jobs — and their estimated seconds — so the ack can quote when THIS
+    document will be done, not when it will merely start.
 
     Tracked explicitly rather than reading ThreadPoolExecutor._work_queue, which is a
-    private attribute with no stability guarantee.
+    private attribute with no stability guarantee. The seconds figure deliberately counts
+    an in-flight job at its full estimate: tracking its remaining time would need worker
+    progress plumbing, and overshooting a queue-wait estimate is the cheap direction to
+    be wrong in.
     """
 
     def __init__(self) -> None:
         self._n = 0
+        self._seconds = 0.0
         self._lock = threading.Lock()
 
-    def add(self) -> int:
+    def add(self, est_seconds: float) -> tuple[int, float]:
+        """Returns (jobs ahead, estimated seconds ahead) as of just before this add."""
         with self._lock:
-            ahead = self._n
+            ahead = (self._n, self._seconds)
             self._n += 1
+            self._seconds += est_seconds
         return ahead
 
-    def done(self) -> None:
+    def done(self, est_seconds: float) -> None:
         with self._lock:
             self._n = max(0, self._n - 1)
+            self._seconds = max(0.0, self._seconds - est_seconds)
 
 
 def _submit(settings: Settings, pool: ThreadPoolExecutor, pending: _Pending, client,
-            job: Job) -> None:
+            job: Job, est_seconds: float) -> None:
     def requeue(j: Job) -> None:
         # Back of the queue, not the front: a document whose dependency is down should not
         # block everything behind it while it retries.
-        pending.add()
-        _submit(settings, pool, pending, client, j)
+        pending.add(est_seconds)
+        _submit(settings, pool, pending, client, j, est_seconds)
 
     fut = pool.submit(_process, settings, client, job, requeue)
-    fut.add_done_callback(lambda _f: pending.done())
+    fut.add_done_callback(lambda _f: pending.done(est_seconds))
 
 
 def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
@@ -281,14 +290,16 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
 
         # Acknowledge immediately. The pipeline takes minutes on CPU, so without this the
         # user has no signal anything is happening. The source is echoed so the thread
-        # reads coherently top to bottom.
-        ahead = pending.add()
-        queued = f" It is queued behind {ahead} other item(s)." if ahead else ""
+        # reads coherently top to bottom. The quoted time is when THIS document should
+        # finish — its own estimate plus everything queued ahead of it.
+        est = estimate_seconds(settings, job.target)
+        ahead_n, ahead_seconds = pending.add(est)
+        queued = f" It is queued behind {ahead_n} other item(s)." if ahead_n else ""
         say(
-            text=f"On it — {job.source_label}. This takes a few minutes.{queued}",
+            text=f"On it — {job.source_label}. {eta_line(est + ahead_seconds)}{queued}",
             thread_ts=thread_ts,
         )
-        _submit(settings, pool, pending, client, job)
+        _submit(settings, pool, pending, client, job, est)
 
     @app.event("app_mention")
     def on_mention(event, say, client):
@@ -306,16 +317,18 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
     # stalled one, which is the confusion the spool exists to prevent.
     for job in restore(settings):
         log.info("resuming queued job %s (%s)", job.id, job.source_label)
-        pending.add()
+        est = estimate_seconds(settings, job.target)
+        _n, ahead_seconds = pending.add(est)
         try:
             app.client.chat_postMessage(
                 channel=job.channel,
                 thread_ts=job.thread_ts,
-                text=f"Picking this back up after a restart — {job.source_label}.",
+                text=f"Picking this back up after a restart — {job.source_label}. "
+                     f"{eta_line(est + ahead_seconds)}",
             )
         except Exception:
             log.exception("could not notify resume for %s", job.id)
-        _submit(settings, pool, pending, app.client, job)
+        _submit(settings, pool, pending, app.client, job, est)
 
     return app, pool
 

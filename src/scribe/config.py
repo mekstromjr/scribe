@@ -76,6 +76,18 @@ class Settings(BaseSettings):
     # more chunks is more expensive than bigger chunks.
     chunk_chars: int = 24000
 
+    # --- ETA shown in the Slack ack -------------------------------------------------
+    # All three MEASURED on insp1 (CT 260) on 2026-08-27, not derived. They are host
+    # constants: rehoming ollama means re-measuring them, like num_thread.
+    #   ocr page:  ~3 min/page incl. the amortized glm-ocr <-> qwen swap
+    #   map chunk: warm average over the clean post-16k-fix Bloom filter chunks
+    #   single:    intercept + per-char rate fit so small docs are not quoted the
+    #              full-budget price; a budget-full single call lands at ~700s
+    eta_ocr_page_seconds: float = 190.0
+    eta_chunk_seconds: float = 480.0
+    eta_single_base_seconds: float = 60.0
+    eta_single_seconds_per_char: float = 0.02
+
     # --- Obsidian vault publishing -------------------------------------------------
     # mekadmin/mekvault. The vault syncs to Obsidian over iCloud with Obsidian Git as
     # version control; the cluster cannot write iCloud, so scribe commits here and the
