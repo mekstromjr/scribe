@@ -137,3 +137,72 @@ class TestSpooledNameDoesNotLeak:
         s = Summary(title="Model Written Title", tldr="", summary="")
         assert note_title(doc, s) == "Syllabus-F26-v0-1"
         assert doc.source == "Syllabus-F26-v0-1.pdf"
+
+
+class TestRequeueKeepsSpool:
+    """A requeued job must keep its spool record and attachment. `return` does not skip
+    `finally`, and the unconditional complete() there deleted the very file the retry
+    was about to read — the first upload to hit a transient failure died with "not a
+    file or URL" after 59 minutes of work."""
+
+    @staticmethod
+    def _job_with_attachment(settings):
+        from scribe.queue import Job, enqueue, spool
+
+        job = Job.new("C", "1", "", "`doc.pdf`")
+        att = spool(settings) / f"{job.id}-doc.pdf"
+        att.write_bytes(b"%PDF-1.4 fake")
+        job.target = str(att)
+        job.attachment = str(att)
+        job.attachment_name = "doc.pdf"
+        enqueue(settings, job)
+        return job, att
+
+    @staticmethod
+    def _client():
+        from types import SimpleNamespace
+
+        return SimpleNamespace(chat_postMessage=lambda **kw: None)
+
+    def test_transient_failure_preserves_spool_and_attachment(self, tmp_path, monkeypatch):
+        from scribe import slack_app
+        from scribe.config import Settings
+        from scribe.ollama import OllamaError
+        from scribe.queue import restore
+
+        settings = Settings(spool_dir=str(tmp_path / "q"))
+        job, att = self._job_with_attachment(settings)
+
+        def boom(*a, **kw):
+            raise OllamaError("server disconnected")
+
+        monkeypatch.setattr(slack_app, "extract", boom)
+        requeued = []
+        slack_app._process(settings, self._client(), job, requeue=requeued.append)
+
+        assert requeued == [job]
+        assert att.exists(), "attachment must survive for the retry to read"
+        restored = restore(settings)
+        assert [j.id for j in restored] == [job.id]
+        assert restored[0].attempts == 1
+
+    def test_exhausted_attempts_clean_up(self, tmp_path, monkeypatch):
+        from scribe import slack_app
+        from scribe.config import Settings
+        from scribe.ollama import OllamaError
+        from scribe.queue import restore
+
+        settings = Settings(spool_dir=str(tmp_path / "q"))
+        job, att = self._job_with_attachment(settings)
+        job.attempts = settings.max_attempts - 1
+
+        def boom(*a, **kw):
+            raise OllamaError("still down")
+
+        monkeypatch.setattr(slack_app, "extract", boom)
+        requeued = []
+        slack_app._process(settings, self._client(), job, requeue=requeued.append)
+
+        assert requeued == []
+        assert not att.exists()
+        assert restore(settings) == []
