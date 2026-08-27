@@ -30,27 +30,27 @@ class TestFirstUrl:
 
 
 class TestPending:
-    """Queue depth drives the ack wording, so the user knows they are waiting behind
-    other work rather than assuming the bot stalled."""
+    """Queue depth drives the ack wording — count for "behind N items", seconds so the
+    quoted ETA is when THIS document finishes, not when it starts."""
 
     def test_reports_how_many_are_ahead(self):
         p = _Pending()
-        assert p.add() == 0
-        assert p.add() == 1
-        assert p.add() == 2
+        assert p.add(100) == (0, 0.0)
+        assert p.add(50) == (1, 100.0)
+        assert p.add(10) == (2, 150.0)
 
-    def test_done_decrements(self):
+    def test_done_decrements_both_tallies(self):
         p = _Pending()
-        p.add()
-        p.add()
-        p.done()
-        assert p.add() == 1
+        p.add(100)
+        p.add(50)
+        p.done(100)
+        assert p.add(10) == (1, 50.0)
 
     def test_never_goes_negative(self):
         p = _Pending()
-        p.done()
-        p.done()
-        assert p.add() == 0
+        p.done(100)
+        p.done(100)
+        assert p.add(10) == (0, 0.0)
 
 
 class TestHelpGating:
