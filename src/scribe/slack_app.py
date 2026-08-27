@@ -84,6 +84,7 @@ def download_file(settings: Settings, file_info: dict, dest: Path) -> Path:
 def _process(settings: Settings, client, job: Job, requeue=lambda _job: None) -> None:
     """Run the pipeline and reply in-thread. Never raises — failures are reported to Slack."""
     local_file = Path(job.attachment) if job.attachment else None
+    requeued = False
     try:
         doc = extract(settings, job.target)
         if job.attachment_name:
@@ -159,6 +160,7 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None) ->
                 job.attempts, settings.max_attempts, job.source_label, exc,
             )
             requeue(job)
+            requeued = True
             return
         log.error("giving up on %s after %d attempts: %s", job.source_label,
                   job.attempts + 1, exc)
@@ -179,7 +181,14 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None) ->
     finally:
         # Clears both the spool record and the downloaded attachment. A job that failed is
         # still done: retrying it forever would block everything behind it.
-        complete(settings, job)
+        #
+        # EXCEPT a requeued job: `return` does not skip `finally`, and completing here
+        # deletes the very attachment the retry is about to read. That is how the first
+        # upload to hit a transient ollama failure died with "not a file or URL" after
+        # 59 minutes of work (2026-08-27) — the retry machinery had only ever been
+        # exercised by URL jobs, which have no attachment to lose.
+        if not requeued:
+            complete(settings, job)
 
 
 class _Pending:
