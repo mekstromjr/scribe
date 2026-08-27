@@ -7,7 +7,6 @@ from __future__ import annotations
 import re
 
 import pypdfium2 as pdfium
-import pytest
 
 from scribe.config import Settings
 from scribe.eta import _budget_chars, _model_seconds, estimate_seconds, eta_line
