@@ -111,6 +111,43 @@ class Settings(BaseSettings):
     # this, the source file is skipped and the note simply has no attachment link.
     max_attachment_bytes: int = 10 * 1024 * 1024
 
+    # --- TTS / Audiobookshelf (home#174) --------------------------------------------
+    # Kokoro (kokoro-tts in this same namespace) turns the note into an m4b that lands
+    # in Audiobookshelf's Articles library and back in the Slack thread. Best-effort by
+    # design: the note is the product, the audio is a bonus, so audio failures never
+    # fail or requeue a job.
+    tts_enabled: bool = True
+
+    # ClusterIP-only, same reasoning as ollama: kokoro-fastapi ships no authentication.
+    # Laptop testing: kubectl -n infra port-forward svc/kokoro-tts 8880
+    tts_host: str = "http://kokoro-tts.infra.svc.cluster.local:8880"
+
+    # af_bella, chosen by ear from samples on 2026-08-27 (af_heart and am_michael were
+    # the runners-up). ONE voice per deployment, not per-request variety: the server
+    # caches every voice tensor it loads and OOM-killed a 2Gi limit when a sampling
+    # run loaded seven (k8s#145) — the 3Gi limit assumes a single cached voice.
+    tts_voice: str = "af_bella"
+
+    # Per-request text cap. Kokoro splits internally, but request-level chunking keeps
+    # single-request wall clock bounded (~2 min at measured 1.6x realtime) so a
+    # mid-article failure loses one segment, not the whole synthesis. Relevant beyond
+    # politeness: the server blocks its event loop while generating (k8s#145 — an HTTP
+    # liveness probe used to SIGKILL it mid-request for exactly this reason), and
+    # shorter requests also survive port-forward flakiness in dev.
+    tts_max_chars: int = 3000
+
+    # Generous per-segment ceiling: at 1.6x realtime a 4000-char segment (~5 min of
+    # audio) synthesizes in ~3 min; 15 min means something is actually wrong.
+    tts_timeout_seconds: float = 900.0
+
+    # In-cluster API endpoint vs the public link put in notes and Slack replies. The
+    # API talks service-to-service; the link must open on a phone.
+    abs_api_url: str = "http://audiobookshelf.prod.svc.cluster.local:80"
+    abs_web_url: str = "https://audiobookshelf.meklab.net"
+    abs_library_name: str = "Articles"
+    # Vault: secret/infra/scribe property abs-token.
+    abs_token: str = ""
+
     # --- Slack ---------------------------------------------------------------------
     # Socket Mode needs BOTH: a bot token from installing the app, and an app-level
     # token with connections:write minted under Basic Information. See SLACK_SETUP.md —

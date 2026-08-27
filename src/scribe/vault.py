@@ -84,6 +84,52 @@ def resolve_attachment(
     return unique_path(settings, settings.vault_files_dir, display.stem, display.suffix)
 
 
+def append_listen_link(settings: Settings, note_path: str, url: str) -> None:
+    """Add a '> Listen:' line to an already-published note.
+
+    A second commit rather than part of the first: the audio finishes tens of minutes
+    after the note, and holding the note back for it would defeat the fast path. The
+    line lands in the provenance blockquote (after '> Ingested:') so the player link
+    sits with the note's other metadata rather than dangling at the bottom.
+    """
+    url_get = _api(settings, f"repository/files/{quote(note_path, safe='')}/raw")
+    try:
+        resp = httpx.get(
+            url_get, headers=_headers(settings), params={"ref": settings.vault_branch},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise VaultError(f"could not read {note_path} to add the listen link: {exc}") from exc
+
+    lines = resp.text.splitlines()
+    listen = f"> Listen: [Audiobookshelf]({url})"
+    if listen in lines:
+        return
+    at = next(
+        (i + 1 for i, line in enumerate(lines) if line.startswith("> Ingested:")),
+        # Fallback: right after the H1, which render() always emits.
+        next((i + 1 for i, line in enumerate(lines) if line.startswith("# ")), len(lines)),
+    )
+    lines.insert(at, listen)
+
+    payload = {
+        "branch": settings.vault_branch,
+        "commit_message": f"scribe: audio link for {Path(note_path).stem}",
+        "actions": [
+            {"action": "update", "file_path": note_path, "content": "\n".join(lines) + "\n"}
+        ],
+    }
+    try:
+        resp = httpx.post(
+            _api(settings, "repository/commits"),
+            headers=_headers(settings), json=payload, timeout=60.0,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise VaultError(f"could not commit the listen link to {note_path}: {exc}") from exc
+
+
 def publish(
     settings: Settings,
     *,

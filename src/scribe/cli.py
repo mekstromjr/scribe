@@ -122,6 +122,56 @@ def _cmd_publish(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_listen(args: argparse.Namespace) -> int:
+    """Extract -> summarize -> synthesize -> package an .m4b; optionally upload to ABS.
+
+    The local-file default exists so the whole audio path is verifiable from a laptop
+    (with kokoro port-forwarded) before any Slack traffic touches it.
+    """
+    import shutil
+
+    from scribe.abs import ABSError, upload
+    from scribe.audio import produce_audio
+    from scribe.note import note_title as _title
+    from scribe.tts import TTSError
+    from scribe.tts import health as tts_health
+
+    settings = load_settings()
+    try:
+        tts_health(settings)
+        doc = extract(settings, args.target)
+        print(f"# extracted: {doc.summary_line()}", file=sys.stderr)
+        summary = summarize(settings, doc)
+        print(f"# summarized in {summary.seconds:.1f}s", file=sys.stderr)
+        title = _title(doc, summary)
+        author = doc.source if doc.kind == "link" else "scribe"
+        result = produce_audio(settings, doc, summary, title=title, author=author)
+    except (ExtractionError, OllamaError, TTSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    with result.workdir:
+        print(
+            f"# {result.segments} segment(s), {result.audio_seconds / 60:.1f} min of audio, "
+            f"synthesized in {result.synth_seconds / 60:.1f} min "
+            f"({result.audio_seconds / max(result.synth_seconds, 0.001):.1f}x realtime)",
+            file=sys.stderr,
+        )
+        if args.upload:
+            try:
+                link = upload(settings, result.m4b, title=title, author=author)
+            except ABSError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+            print(f"uploaded: {link}")
+        else:
+            out = Path(args.out or f"{slugify(title)}.m4b").expanduser()
+            out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(result.m4b, out)
+            print(f"wrote {out}")
+    return 0
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:  # noqa: ARG001
     """Run the Slack Socket Mode bot. Blocks."""
     from scribe.slack_app import run
@@ -180,6 +230,17 @@ def main() -> int:
     p_publish = sub.add_parser("publish", help="extract, summarize, and commit to the vault")
     p_publish.add_argument("target")
     p_publish.set_defaults(func=_cmd_publish)
+
+    p_listen = sub.add_parser(
+        "listen", help="extract, summarize, synthesize, and package an .m4b"
+    )
+    p_listen.add_argument("target")
+    p_listen.add_argument("--out", help="write the .m4b here (default: ./<title>.m4b)")
+    p_listen.add_argument(
+        "--upload", action="store_true",
+        help="upload to the Audiobookshelf Articles library instead of writing locally",
+    )
+    p_listen.set_defaults(func=_cmd_listen)
 
     p_serve = sub.add_parser("serve", help="run the Slack bot (Socket Mode)")
     p_serve.set_defaults(func=_cmd_serve)
