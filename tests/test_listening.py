@@ -202,6 +202,78 @@ class TestBuildScript:
         assert [c.title for c in chapters] == ["Summary"]
 
 
+class TestStructureAwareChapters:
+    """One chapter per source section (scribe#3)."""
+
+    def _sections(self, body: str):
+        return build_script(_doc(body), _summary(), max_chars=4000)
+
+    def test_markdown_headings_become_chapters(self):
+        body = (
+            "# Doc Title\n\nLead paragraph. " + "x" * 720 + "\n\n"
+            "## Origin\n\n" + "o" * 900 + "\n\n"
+            "## Variants\n\n" + "v" * 900 + "\n\n"
+            "## Usage\n\n" + "u" * 900
+        )
+        titles = [c.title for c in self._sections(body)]
+        assert titles == ["Summary", "Introduction", "Origin", "Variants", "Usage"]
+
+    def test_lead_before_the_first_heading_is_never_lost(self):
+        body = ("# Title\n\nThe definition sentence. " + "x" * 720
+                + "\n\n## One\n\n" + "a" * 900 + "\n\n## Two\n\n" + "b" * 900)
+        spoken = " ".join(s for c in self._sections(body) for s in c.segments)
+        assert "The definition sentence." in spoken
+
+    def test_heading_is_spoken_at_the_top_of_its_chapter(self):
+        body = ("## Alpha\n\n" + "a" * 900 + "\n\n## Beta\n\n" + "b" * 900)
+        chapters = self._sections(body)
+        beta = next(c for c in chapters if c.title == "Beta")
+        assert beta.segments[0].startswith("Beta.")
+
+    def test_single_heading_document_stays_flat(self):
+        # One heading is not a structure; today's behavior is correct.
+        chapters = self._sections("## Only\n\n" + "a" * 900)
+        assert [c.title for c in chapters] == ["Summary", "Full article"]
+
+    def test_unstructured_text_stays_flat(self):
+        chapters = self._sections("Just prose. " * 200)
+        assert [c.title for c in chapters] == ["Summary", "Full article"]
+
+    def test_tiny_sections_merge_into_their_predecessor(self):
+        body = ("## Big\n\n" + "a" * 900 + "\n\n## Tiny\n\nshort\n\n"
+                "## AlsoBig\n\n" + "b" * 900)
+        titles = [c.title for c in self._sections(body)]
+        assert "Tiny" not in titles
+        assert titles == ["Summary", "Big", "AlsoBig"]
+        # Merged, not dropped: the text still gets spoken.
+        spoken = " ".join(s for c in self._sections(body) for s in c.segments)
+        assert "short" in spoken
+
+    def test_chapter_count_is_capped(self):
+        body = "".join(f"## Section {i}\n\n" + "x" * 900 + "\n\n" for i in range(40))
+        chapters = self._sections(body)
+        assert len(chapters) <= 21  # 20 article chapters + Summary
+
+    def test_long_headings_are_truncated_for_the_player(self):
+        body = ("## " + "Very Long Heading " * 8 + "\n\n" + "a" * 900
+                + "\n\n## Short\n\n" + "b" * 900)
+        title = self._sections(body)[1].title
+        assert len(title) <= 63
+        assert title.endswith("...")
+
+    def test_pdf_style_numbered_headings_are_detected(self):
+        body = ("3.1 Turing Machines\n\n" + "a" * 900
+                + "\n\n3.2 Decidability\n\n" + "b" * 900)
+        titles = [c.title for c in self._sections(body)]
+        assert titles == ["Summary", "3.1 Turing Machines", "3.2 Decidability"]
+
+    def test_sentences_are_not_mistaken_for_pdf_headings(self):
+        # Ends with punctuation and reads as prose — must not split here.
+        body = ("The Machine Was Running Well.\n\n" + "a" * 900
+                + "\n\nAnother Sentence That Ends.\n\n" + "b" * 900)
+        assert [c.title for c in self._sections(body)] == ["Summary", "Full article"]
+
+
 class TestLintScript:
     def test_clean_script_reports_nothing(self):
         chapters = build_script(_doc("Plain prose, nothing fancy."), _summary(), max_chars=4000)
