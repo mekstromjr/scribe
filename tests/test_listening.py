@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from scribe.document import Document, Method, Page
-from scribe.listening import build_script, clean_for_listening, split_segments
+from scribe.listening import (
+    Chapter,
+    build_script,
+    clean_for_listening,
+    lint_script,
+    split_segments,
+)
 from scribe.summarize import Summary
 
 
@@ -148,3 +154,39 @@ class TestBuildScript:
     def test_empty_article_text_yields_summary_only(self):
         chapters = build_script(_doc("   "), _summary(), max_chars=4000)
         assert [c.title for c in chapters] == ["Summary"]
+
+
+class TestLintScript:
+    def test_clean_script_reports_nothing(self):
+        chapters = build_script(_doc("Plain prose, nothing fancy."), _summary(), max_chars=4000)
+        assert lint_script(chapters) == []
+
+    def test_finds_residue_the_cleaner_missed(self):
+        # Bypasses the cleaner deliberately — the lint is the safety net UNDER it.
+        chapters = [
+            Chapter("Summary", ["ok <sup>1</sup> and [broken markup( and https://x.y"])
+        ]
+        findings = lint_script(chapters)
+        kinds = " ".join(findings)
+        assert "html tag" in kinds
+        assert "bracket residue" in kinds
+        assert "url" in kinds
+
+    def test_author_brackets_are_not_flagged(self):
+        # [sic]/[if]/IPA survive cleaning ON PURPOSE; the lint must not cry wolf.
+        chapters = [Chapter("Summary", ["he said [sic] and nature employs [if] one"])]
+        assert lint_script(chapters) == []
+
+    def test_findings_carry_counts_and_context(self):
+        chapters = [Chapter("Summary", ["a [broken one( b [broken two( c"])]
+        findings = lint_script(chapters)
+        assert any("x2" in f and "e.g." in f for f in findings)
+
+    def test_real_cleaned_wikipedia_style_text_is_clean(self):
+        raw = (
+            'KISS ("Keep it simple")<sup>[\\[1\\]](#cite_note-BRich-1)</sup> is a '
+            "[design](https://en.wikipedia.org/wiki/Design) principle.[\\[2\\]]"
+            "(#cite_note-TDal-2)\n\n## See also\n\n[edit]\n\nRelated."
+        )
+        chapters = [Chapter("Full article", [clean_for_listening(raw)])]
+        assert lint_script(chapters) == []

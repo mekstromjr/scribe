@@ -137,6 +137,38 @@ def _cmd_listen(args: argparse.Namespace) -> int:
     from scribe.tts import health as tts_health
 
     settings = load_settings()
+
+    if args.dry_run:
+        # The whole point of a dry run is knowing about vocalized artifacts BEFORE
+        # spending synthesis minutes — so it needs neither kokoro nor the summarizer.
+        from scribe.listening import build_script, lint_script
+        from scribe.summarize import Summary
+
+        try:
+            doc = extract(settings, args.target)
+        except (ExtractionError, OllamaError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        chapters = build_script(
+            doc,
+            Summary(title=doc.title or args.target, tldr="(summary omitted in dry run)",
+                    summary=""),
+            max_chars=settings.tts_max_chars,
+        )
+        findings = lint_script(chapters)
+        for ch in chapters:
+            print(f"===== chapter: {ch.title} ({len(ch.segments)} segment(s)) =====")
+            for seg in ch.segments:
+                print(seg)
+                print("----- segment break -----")
+        if findings:
+            print("\nLINT: artifacts that WILL be vocalized:", file=sys.stderr)
+            for f in findings:
+                print(f"  - {f}", file=sys.stderr)
+            return 1
+        print("\nLINT: clean", file=sys.stderr)
+        return 0
+
     try:
         tts_health(settings)
         doc = extract(settings, args.target)
@@ -239,6 +271,11 @@ def main() -> int:
     p_listen.add_argument(
         "--upload", action="store_true",
         help="upload to the Audiobookshelf Articles library instead of writing locally",
+    )
+    p_listen.add_argument(
+        "--dry-run", action="store_true",
+        help="print the listening script and artifact lint without synthesizing "
+             "(no kokoro or summarizer needed); exits 1 if artifacts are found",
     )
     p_listen.set_defaults(func=_cmd_listen)
 
