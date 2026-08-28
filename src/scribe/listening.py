@@ -75,10 +75,20 @@ _END_MATTER = re.compile(
 # and the parenthesized husks of anchor-only links. Empty brackets are what remains
 # after a citation is stripped out of a link label; they must go too or the voice
 # gets a spurious pause-and-click where the marker was.
-_EDIT_LINK = re.compile(r"\[?\[edit\]\([^)]*\)\]?", re.IGNORECASE)
+# Whitespace-tolerant: the block arrives as "[\n[edit](/w/index.php?…)]" — the outer
+# bracket sits on its own line.
+_EDIT_LINK = re.compile(r"\[?\s*\[edit\]\s*\([^)]*\)\s*\]?", re.IGNORECASE)
 _EDIT_MARKER = re.compile(r"\[edit\]", re.IGNORECASE)
 _ANCHOR_HUSK = re.compile(r"\(#[^)\s]*\)")
 _EMPTY_BRACKETS = re.compile(r"\[\s*\]")
+# Last resort, after every structured rule has run: a bracket wrapping one short word
+# is the author's own ("[sic]") and stays; any OTHER surviving bracket is markup
+# residue in some nesting the rules above did not anticipate (multi-line figure
+# blocks, links whose labels contain links, ...). Brackets are never spoken usefully,
+# so deleting the character loses nothing the listener could have heard.
+_AUTHOR_BRACKET = re.compile(r"\[(\w{1,12})\]")
+_STRAY_BRACKET = re.compile(r"[\[\]]")
+_OPEN_SENTINEL, _CLOSE_SENTINEL = "\x00", "\x01"
 
 
 def clean_for_listening(text: str) -> str:
@@ -103,12 +113,18 @@ def clean_for_listening(text: str) -> str:
     # Headings become spoken sentences: a pause-inducing period, not a hash.
     text = _HEADING.sub(lambda m: f"{m.group(1).strip().rstrip('.:')}." , text)
     text = _INLINE_CODE.sub(r"\1", text)
-    # Emphasis twice: bold-italic nests (*** outside, * inside after one pass).
+    # Emphasis twice: bold-italic nests (*** outside, * inside after one pass). Then
+    # sweep unpaired leftovers — sources contain unbalanced "**" the pair rule cannot
+    # match. Single "*" stays (it can be the author's own character).
     text = _EMPHASIS.sub(r"\2", text)
     text = _EMPHASIS.sub(r"\2", text)
+    text = re.sub(r"\*{2,}", "", text)
     text = _BLOCKQUOTE.sub("", text)
     text = _LIST_MARKER.sub("", text)
     text = _EMPTY_BRACKETS.sub("", text)
+    text = _AUTHOR_BRACKET.sub(rf"{_OPEN_SENTINEL}\1{_CLOSE_SENTINEL}", text)
+    text = _STRAY_BRACKET.sub("", text)
+    text = text.replace(_OPEN_SENTINEL, "[").replace(_CLOSE_SENTINEL, "]")
     text = _MULTI_SPACE.sub(" ", text)
     text = _MULTI_BLANK.sub("\n\n", text)
     return text.strip()
@@ -164,6 +180,47 @@ def split_segments(text: str, max_chars: int) -> list[str]:
 class Chapter:
     title: str
     segments: list[str]
+
+
+# What SHOULD never survive cleaning. The script is deterministic, so artifacts are
+# knowable before a single second is synthesized — lint findings mean a cleaning rule
+# is missing, and hearing about it here costs nothing while hearing it in the audio
+# costs a re-listen (this is how the "sup"/footnote noise was caught: by ear, late).
+_LINT_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("html tag", re.compile(r"</?[a-z][a-z0-9]*\b[^>]*>", re.IGNORECASE)),
+    ("bracket residue", re.compile(r"[\[\]]")),
+    ("url", re.compile(r"https?://|www\.", re.IGNORECASE)),
+    ("backslash escape", re.compile(r"\\[\[\]()*_#]")),
+    ("anchor husk", re.compile(r"\(#[^)\s]*\)")),
+    ("markdown emphasis", re.compile(r"(\*{1,3}|_{2,3})\S")),
+    ("markdown heading", re.compile(r"^#{1,6}\s", re.MULTILINE)),
+    ("code fence", re.compile(r"```")),
+    ("citation marker", re.compile(r"\bcite[_-]?(?:note|ref)", re.IGNORECASE)),
+]
+
+
+def lint_script(chapters: list[Chapter]) -> list[str]:
+    """Report likely-vocalized artifacts left in a listening script.
+
+    Returns human-readable findings ("bracket residue x12, e.g. ...context..."), empty
+    when the script is clean. Callers decide severity: the CLI prints them, the
+    pipeline logs them and synthesizes anyway — a slightly noisy audiobook still
+    beats no audiobook, but the finding tells us which cleaning rule to add next.
+    """
+    findings: list[str] = []
+    text = "\n\n".join(seg for ch in chapters for seg in ch.segments)
+    # The cleaner deliberately keeps short author brackets ("[sic]", "[if]", IPA like
+    # "[aː]") — the lint must not cry wolf about what is kept on purpose, or real
+    # findings drown and the report gets ignored.
+    text = _AUTHOR_BRACKET.sub(r"\1", text)
+    for name, pattern in _LINT_PATTERNS:
+        hits = list(pattern.finditer(text))
+        if not hits:
+            continue
+        i = hits[0].start()
+        context = " ".join(text[max(0, i - 40): i + 40].split())
+        findings.append(f"{name} x{len(hits)}, e.g. ...{context}...")
+    return findings
 
 
 def build_script(doc: Document, summary: Summary, *, max_chars: int) -> list[Chapter]:
