@@ -134,6 +134,10 @@ class Settings(BaseSettings):
     # fail or requeue a job.
     tts_enabled: bool = True
 
+    # Whether jobs publish a note to the Obsidian vault. Both this and tts_enabled are
+    # runtime-toggleable from Slack (see runtime_config); env sets the default.
+    vault_enabled: bool = True
+
     # ClusterIP-only, same reasoning as ollama: kokoro-fastapi ships no authentication.
     # Laptop testing: kubectl -n infra port-forward svc/kokoro-tts 8880
     tts_host: str = "http://kokoro-tts.infra.svc.cluster.local:8880"

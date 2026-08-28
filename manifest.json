@@ -10,6 +10,31 @@
       "display_name": "scribe",
       "always_online": true
     },
+    "slash_commands": [
+      {
+        "command": "/scribevoice",
+        "description": "Set the TTS voice, or list the available voices",
+        "usage_hint": "[voice id]",
+        "should_escape": false
+      },
+      {
+        "command": "/scribetoggleobs",
+        "description": "Turn Obsidian vault publishing on or off",
+        "usage_hint": "[on|off]",
+        "should_escape": false
+      },
+      {
+        "command": "/scribetoggletts",
+        "description": "Turn TTS audio generation on or off",
+        "usage_hint": "[on|off]",
+        "should_escape": false
+      },
+      {
+        "command": "/scribeconfig",
+        "description": "Show the current scribe settings",
+        "should_escape": false
+      }
+    ],
     "app_home": {
       "home_tab_enabled": false,
       "messages_tab_enabled": true,
@@ -21,7 +46,9 @@
       "bot": [
         "app_mentions:read",
         "chat:write",
+        "commands",
         "files:read",
+        "files:write",
         "im:history",
         "im:read",
         "im:write",
