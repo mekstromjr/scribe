@@ -25,7 +25,8 @@
         "im:history",
         "im:read",
         "im:write",
-        "channels:history"
+        "channels:history",
+        "users:read"
       ]
     }
   },

@@ -36,6 +36,9 @@ class Job:
     # concurrent uploads from colliding on disk, but the vault must get the clean name --
     # otherwise notes link attachments called "1787099069943412312-1cc31a4e-Syllabus.pdf".
     attachment_name: str | None = None
+    # Slack user id of the sender, for rendering ETAs in THEIR profile timezone on the
+    # restart-resume path. Optional so records spooled before this field restore fine.
+    user: str | None = None
     # Retry counter. A transient dependency outage (ollama restarting, a network blip)
     # must not permanently lose a queued document -- that is the exact durability the
     # spool exists to provide.
