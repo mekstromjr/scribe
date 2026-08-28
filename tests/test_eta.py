@@ -69,8 +69,12 @@ def test_blank_pdf_pages_count_as_ocr(tmp_path):
     assert est >= 3 * SETTINGS.eta_ocr_page_seconds
 
 
-def test_eta_line_renders_slack_date_token():
-    line = eta_line(600)
-    assert re.fullmatch(
-        r"Estimated completion: <!date\^\d+\^\{time\}\|in about 10 min>\.", line
-    )
+def test_eta_line_renders_24h_clock():
+    line = eta_line(SETTINGS, 600)
+    assert re.fullmatch(r"Estimated completion: \d{2}:\d{2}( tomorrow)?\.", line)
+
+
+def test_eta_line_crossing_midnight_says_tomorrow():
+    # 26h from now is unambiguously on the next calendar day in every timezone.
+    line = eta_line(SETTINGS, 26 * 3600)
+    assert line.endswith(" tomorrow.")

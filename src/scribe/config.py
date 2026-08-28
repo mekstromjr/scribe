@@ -96,6 +96,10 @@ class Settings(BaseSettings):
     eta_ocr_page_seconds: float = 190.0
     eta_chunk_seconds: float = 480.0
     eta_single_base_seconds: float = 60.0
+    # Timezone the ETA clock is rendered in. Slack's <!date> token was viewer-local but
+    # only renders 12-hour time; a fixed zone in 24-hour format was preferred. Single-user
+    # system, so one zone is correct by definition.
+    timezone: str = "America/Denver"
     eta_single_seconds_per_char: float = 0.02
 
     # --- Obsidian vault publishing -------------------------------------------------
