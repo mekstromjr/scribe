@@ -46,8 +46,68 @@ HELP_TEXT = (
     "inbox (`+/`). You get the TL;DR back in thread with a link that opens the note in "
     "Obsidian.\n\n"
     "Documents are processed one at a time and a long article takes several minutes — "
-    "I'll tell you where you are in the queue."
+    "I'll tell you where you are in the queue.\n\n"
+    "Sent something by mistake? Reply *cancel* in its thread and I'll stop."
 )
+
+
+CANCEL_WORDS = {"cancel", "stop", "abort", "nevermind", "nvm"}
+
+
+class JobCanceled(Exception):
+    """Raised at a pipeline checkpoint when the job's thread said to stop."""
+
+
+def is_cancel(text: str) -> bool:
+    """True if a thread reply is a cancel command. Mentions are stripped first so
+    "@scribe cancel" in a channel works the same as "cancel" in a DM."""
+    bare = re.sub(r"<@[^>]+>", "", text or "").strip().strip("!.").lower()
+    return bare in CANCEL_WORDS
+
+
+class _Active:
+    """Tracks which jobs belong to which thread, and which have been canceled.
+
+    Entries are COUNTED, not merely set: a requeued job is resubmitted under the same id
+    before the failed run's done-callback fires, and a plain set would let that callback
+    delete the retry's tracking entry.
+    """
+
+    def __init__(self) -> None:
+        self._by_thread: dict[str, dict[str, Job]] = {}
+        self._counts: dict[str, int] = {}
+        self._canceled: set[str] = set()
+        self._lock = threading.Lock()
+
+    def add(self, job: Job) -> None:
+        with self._lock:
+            self._by_thread.setdefault(job.thread_ts, {})[job.id] = job
+            self._counts[job.id] = self._counts.get(job.id, 0) + 1
+
+    def remove(self, job: Job) -> None:
+        with self._lock:
+            n = self._counts.get(job.id, 0) - 1
+            if n > 0:
+                self._counts[job.id] = n
+                return
+            self._counts.pop(job.id, None)
+            self._canceled.discard(job.id)
+            thread = self._by_thread.get(job.thread_ts)
+            if thread:
+                thread.pop(job.id, None)
+                if not thread:
+                    del self._by_thread[job.thread_ts]
+
+    def cancel_thread(self, thread_ts: str) -> list[Job]:
+        """Mark every job in the thread canceled; returns them (may be empty)."""
+        with self._lock:
+            jobs = list(self._by_thread.get(thread_ts, {}).values())
+            self._canceled.update(j.id for j in jobs)
+        return jobs
+
+    def canceled(self, job_id: str) -> bool:
+        with self._lock:
+            return job_id in self._canceled
 
 
 def first_url(text: str) -> str | None:
@@ -137,11 +197,20 @@ def _audio_stage(settings: Settings, client, job: Job, doc, summary, note_path: 
             )
 
 
-def _process(settings: Settings, client, job: Job, requeue=lambda _job: None) -> None:
+def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
+             active: _Active | None = None) -> None:
     """Run the pipeline and reply in-thread. Never raises — failures are reported to Slack."""
     local_file = Path(job.attachment) if job.attachment else None
     requeued = False
+
+    def abort() -> None:
+        # The one user-visible cancel message was already posted by the cancel command;
+        # everything after it tears down silently.
+        if active and active.canceled(job.id):
+            raise JobCanceled()
+
     try:
+        abort()
         doc = extract(settings, job.target)
         if job.attachment_name:
             # The extractors derive title/source from the file PATH, which for an upload is
@@ -150,8 +219,11 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None) ->
             # its Sources frontmatter -- e.g. "1787110665559937147-a2779432-Syllabus".
             doc.source = job.attachment_name
             doc.title = Path(job.attachment_name).stem
-        summary = summarize(settings, doc)
+        summary = summarize(settings, doc, abort=abort)
 
+        # Publishing is the point of no return: past here the note exists and cancel
+        # would leave more mess than it saves.
+        abort()
         attachment_path = (
             resolve_attachment(settings, local_file, job.attachment_name)
             if local_file
@@ -200,7 +272,13 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None) ->
         # realtime a long article synthesizes for tens of minutes, and a TTS failure
         # must never fail (or requeue) a job whose note already published.
         if settings.tts_enabled and settings.abs_token:
-            _audio_stage(settings, client, job, doc, summary, result["note"])
+            if active and active.canceled(job.id):
+                # Canceled after the note published: keep the note, skip only the audio.
+                log.info("skipping audio for canceled job %s", job.id)
+            else:
+                _audio_stage(settings, client, job, doc, summary, result["note"])
+    except JobCanceled:
+        log.info("job %s canceled by its thread", job.id)
     except ExtractionError as exc:
         # Bad input -- a dead link, an unsupported file. Retrying will not help.
         log.warning("extraction failed for %s: %s", job.source_label, exc)
@@ -282,16 +360,22 @@ class _Pending:
             self._seconds = max(0.0, self._seconds - est_seconds)
 
 
-def _submit(settings: Settings, pool: ThreadPoolExecutor, pending: _Pending, client,
-            job: Job, est_seconds: float) -> None:
+def _submit(settings: Settings, pool: ThreadPoolExecutor, pending: _Pending,
+            active: _Active, client, job: Job, est_seconds: float) -> None:
     def requeue(j: Job) -> None:
         # Back of the queue, not the front: a document whose dependency is down should not
         # block everything behind it while it retries.
         pending.add(est_seconds)
-        _submit(settings, pool, pending, client, j, est_seconds)
+        _submit(settings, pool, pending, active, client, j, est_seconds)
 
-    fut = pool.submit(_process, settings, client, job, requeue)
-    fut.add_done_callback(lambda _f: pending.done(est_seconds))
+    active.add(job)
+    fut = pool.submit(_process, settings, client, job, requeue, active)
+
+    def _done(_f) -> None:
+        pending.done(est_seconds)
+        active.remove(job)
+
+    fut.add_done_callback(_done)
 
 
 def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
@@ -300,6 +384,7 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
     # Parallel documents would not finish sooner, only thrash a shared bottleneck.
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="scribe")
     pending = _Pending()
+    active = _Active()
 
     def handle(event: dict, say, client) -> None:
         # Ignore our own messages, or we would answer ourselves forever.
@@ -319,6 +404,25 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
         channel = event["channel"]
         # Reply in a thread on the original message so the channel stays readable.
         thread_ts = event.get("thread_ts") or event["ts"]
+
+        # A cancel reply IN an existing thread stops that thread's job(s). Checked before
+        # link/file extraction so "cancel" can never be mistaken for content. Spool
+        # records are removed HERE, durably — a pod restart must not resurrect a job the
+        # user already canceled; the in-flight pipeline stops at its next checkpoint.
+        if event.get("thread_ts") and not event.get("files") and is_cancel(event.get("text", "")):
+            jobs = active.cancel_thread(event["thread_ts"])
+            for j in jobs:
+                complete(settings, j)
+            if jobs:
+                labels = ", ".join(j.source_label for j in jobs)
+                say(
+                    text=f"Canceled — {labels}. If a step was mid-flight it stops at "
+                         f"the next checkpoint.",
+                    thread_ts=thread_ts,
+                )
+            else:
+                say(text="Nothing is running in this thread.", thread_ts=thread_ts)
+            return
 
         target: str | None = None
         source_label: str | None = None
@@ -369,7 +473,7 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
             text=f"On it — {job.source_label}. {eta_line(est + ahead_seconds)}{queued}",
             thread_ts=thread_ts,
         )
-        _submit(settings, pool, pending, client, job, est)
+        _submit(settings, pool, pending, active, client, job, est)
 
     @app.event("app_mention")
     def on_mention(event, say, client):
@@ -398,7 +502,7 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
             )
         except Exception:
             log.exception("could not notify resume for %s", job.id)
-        _submit(settings, pool, pending, app.client, job, est)
+        _submit(settings, pool, pending, active, app.client, job, est)
 
     return app, pool
 

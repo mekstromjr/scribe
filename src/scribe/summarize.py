@@ -138,7 +138,7 @@ def _build(data: dict, doc: Document, seconds: float, *, dropped: int = 0,
     )
 
 
-def _map_reduce(settings: Settings, doc: Document, budget_chars: int) -> Summary:
+def _map_reduce(settings: Settings, doc: Document, budget_chars: int, abort=None) -> Summary:
     """Summarize a document too long for one pass, without losing its tail.
 
     Truncation drops the conclusion, which is usually the part worth reading. This costs
@@ -150,6 +150,11 @@ def _map_reduce(settings: Settings, doc: Document, budget_chars: int) -> Summary
     elapsed = 0.0
     points: list[str] = []
     for n, piece in enumerate(chunks, start=1):
+        # Cancellation checkpoint: a canceled job stops before the next model call
+        # rather than after the whole document. Chunks are the long pole (~8 min each
+        # on insp1), so this is the granularity that matters.
+        if abort:
+            abort()
         data, secs = chat_structured(
             settings,
             MAP_PROMPT.format(n=n, total=len(chunks), text=piece),
@@ -171,6 +176,8 @@ def _map_reduce(settings: Settings, doc: Document, budget_chars: int) -> Summary
         groups = chunk(joined, settings.chunk_chars)
         collapsed: list[str] = []
         for n, piece in enumerate(groups, start=1):
+            if abort:
+                abort()
             data, secs = chat_structured(
                 settings,
                 COLLAPSE_PROMPT.format(n=n, total=len(groups), text=piece),
@@ -189,21 +196,25 @@ def _map_reduce(settings: Settings, doc: Document, budget_chars: int) -> Summary
     # per round this should never fire on real input, but Ollama truncates silently, so
     # an unguarded overflow would be invisible.
     joined, dropped = _fit_to_context(joined, settings)
+    if abort:
+        abort()
     data, secs = chat_structured(
         settings, REDUCE_PROMPT.format(source=doc.source, points=joined), SCHEMA
     )
     return _build(data, doc, elapsed + secs, dropped=dropped, sections=len(chunks))
 
 
-def summarize(settings: Settings, doc: Document) -> Summary:
+def summarize(settings: Settings, doc: Document, abort=None) -> Summary:
     budget_chars = int((settings.context_tokens - settings.response_reserve_tokens) * 4)
 
     # Single pass whenever the document fits: it is both faster AND better, since the
     # model sees the whole argument at once. Chunking is only for the case where the
     # alternative is losing the tail.
     if len(doc.text) > budget_chars:
-        return _map_reduce(settings, doc, budget_chars)
+        return _map_reduce(settings, doc, budget_chars, abort=abort)
 
+    if abort:
+        abort()
     prompt = PROMPT.format(source=doc.source, text=doc.text)
     data, seconds = chat_structured(settings, prompt, SCHEMA)
     # No truncation is possible on this path — it only runs when the document fits.
