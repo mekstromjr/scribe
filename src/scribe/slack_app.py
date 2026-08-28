@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -108,6 +109,36 @@ class _Active:
     def canceled(self, job_id: str) -> bool:
         with self._lock:
             return job_id in self._canceled
+
+
+class _UserTz:
+    """Cached Slack profile timezones. Slack keeps a user's tz current as they travel,
+    so the profile beats any configured zone — but users.info per message would be
+    wasteful, and a lookup failure must never block an ack, so misses return None and
+    the caller falls back to settings.timezone."""
+
+    TTL_SECONDS = 3600.0
+
+    def __init__(self) -> None:
+        self._cache: dict[str, tuple[str | None, float]] = {}
+        self._lock = threading.Lock()
+
+    def get(self, client, user_id: str | None) -> str | None:
+        if not user_id:
+            return None
+        now = time.monotonic()
+        with self._lock:
+            hit = self._cache.get(user_id)
+            if hit and now - hit[1] < self.TTL_SECONDS:
+                return hit[0]
+        tz: str | None = None
+        try:
+            tz = client.users_info(user=user_id).get("user", {}).get("tz") or None
+        except Exception:
+            log.warning("users.info failed for %s; using fallback timezone", user_id)
+        with self._lock:
+            self._cache[user_id] = (tz, now)
+        return tz
 
 
 def first_url(text: str) -> str | None:
@@ -389,6 +420,7 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="scribe")
     pending = _Pending()
     active = _Active()
+    user_tz = _UserTz()
 
     def handle(event: dict, say, client) -> None:
         # Ignore our own messages, or we would answer ourselves forever.
@@ -464,6 +496,7 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
         job = Job.new(channel, thread_ts, target, source_label or target)
         job.attachment = attachment
         job.attachment_name = attachment_name
+        job.user = event.get("user")
         enqueue(settings, job)
 
         # Acknowledge immediately. The pipeline takes minutes on CPU, so without this the
@@ -474,7 +507,9 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
         ahead_n, ahead_seconds = pending.add(est)
         queued = f" It is queued behind {ahead_n} other item(s)." if ahead_n else ""
         say(
-            text=f"On it — {job.source_label}. {eta_line(settings, est + ahead_seconds)}{queued}",
+            text=f"On it — {job.source_label}. "
+                 f"{eta_line(settings, est + ahead_seconds, tz=user_tz.get(client, job.user))}"
+                 f"{queued}",
             thread_ts=thread_ts,
         )
         _submit(settings, pool, pending, active, client, job, est)
@@ -514,7 +549,8 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
                 channel=job.channel,
                 thread_ts=job.thread_ts,
                 text=f"Picking this back up after a restart — {job.source_label}. "
-                     f"{eta_line(settings, est + ahead_seconds)}",
+                     + eta_line(settings, est + ahead_seconds,
+                                tz=user_tz.get(app.client, job.user)),
             )
         except Exception:
             log.exception("could not notify resume for %s", job.id)

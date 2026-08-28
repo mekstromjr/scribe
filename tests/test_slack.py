@@ -206,3 +206,51 @@ class TestRequeueKeepsSpool:
         assert requeued == []
         assert not att.exists()
         assert restore(settings) == []
+
+
+class TestUserTz:
+    """The sender's Slack profile timezone beats the configured fallback, but a lookup
+    failure must never block an ack."""
+
+    def test_caches_the_profile_lookup(self):
+        from types import SimpleNamespace
+
+        from scribe.slack_app import _UserTz
+
+        calls = []
+
+        def users_info(user):
+            calls.append(user)
+            return {"user": {"tz": "Asia/Tokyo"}}
+
+        client = SimpleNamespace(users_info=users_info)
+        u = _UserTz()
+        assert u.get(client, "U1") == "Asia/Tokyo"
+        assert u.get(client, "U1") == "Asia/Tokyo"
+        assert calls == ["U1"]
+
+    def test_lookup_failure_returns_none(self):
+        from types import SimpleNamespace
+
+        from scribe.slack_app import _UserTz
+
+        def users_info(user):
+            raise RuntimeError("slack down")
+
+        u = _UserTz()
+        assert u.get(SimpleNamespace(users_info=users_info), "U1") is None
+
+    def test_no_user_id_returns_none(self):
+        from scribe.slack_app import _UserTz
+
+        assert _UserTz().get(None, None) is None
+
+    def test_user_survives_the_spool_round_trip(self, tmp_path):
+        from scribe.config import Settings
+        from scribe.queue import Job, enqueue, restore
+
+        settings = Settings(spool_dir=str(tmp_path / "q"))
+        job = Job.new("C", "1", "t", "t")
+        job.user = "U0MICHAEL"
+        enqueue(settings, job)
+        assert restore(settings)[0].user == "U0MICHAEL"
