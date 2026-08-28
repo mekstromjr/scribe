@@ -95,15 +95,22 @@ def estimate_seconds(settings: Settings, target: str) -> int:
         return round(_model_seconds(settings, _budget_chars(settings)))
 
 
-def eta_line(settings: Settings, total_seconds: float) -> str:
-    """One sentence with a 24-hour clock in the configured timezone.
+def eta_line(settings: Settings, total_seconds: float, tz: str | None = None) -> str:
+    """One sentence with a 24-hour clock.
 
-    Slack's <!date^...^{time}> token renders viewer-local but only in 12-hour format,
-    and there is no 24-hour variant — so the clock is rendered server-side in
-    settings.timezone instead. An ETA that lands on a different calendar day says so,
-    or "23:58" quoted at 23:50 would read as fourteen hours away.
+    Rendered in ``tz`` — normally the Slack profile timezone of whoever sent the
+    message, which Slack keeps current as they travel — falling back to
+    settings.timezone when the profile has none or names a zone this host does not
+    know. Slack's <!date^...^{time}> token renders viewer-local but only in 12-hour
+    format, which is why the clock is server-side at all. An ETA that lands on a
+    different calendar day says so, or "23:58" quoted at 23:50 would read as fourteen
+    hours away.
     """
-    now = datetime.now(tz=ZoneInfo(settings.timezone))
+    try:
+        zone = ZoneInfo(tz) if tz else ZoneInfo(settings.timezone)
+    except KeyError:
+        zone = ZoneInfo(settings.timezone)
+    now = datetime.now(tz=zone)
     done = now + timedelta(seconds=total_seconds)
     day = " tomorrow" if done.date() != now.date() else ""
     return f"Estimated completion: {done:%H:%M}{day}."
