@@ -78,3 +78,14 @@ def test_eta_line_crossing_midnight_says_tomorrow():
     # 26h from now is unambiguously on the next calendar day in every timezone.
     line = eta_line(SETTINGS, 26 * 3600)
     assert line.endswith(" tomorrow.")
+
+
+def test_eta_line_prefers_given_timezone():
+    # Zones a hemisphere apart cannot render the same wall clock for the same instant.
+    tokyo = eta_line(SETTINGS, 600, tz="Asia/Tokyo")
+    denver = eta_line(SETTINGS, 600, tz="America/Denver")
+    assert tokyo != denver
+
+
+def test_eta_line_unknown_timezone_falls_back():
+    assert eta_line(SETTINGS, 600, tz="Not/AZone").startswith("Estimated completion: ")
