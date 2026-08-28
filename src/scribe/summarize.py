@@ -62,6 +62,19 @@ Section {n} of {total}:
 --- END SECTION TEXT ---
 """
 
+COLLAPSE_PROMPT = """\
+These are key points already extracted from CONSECUTIVE SECTIONS of a long document, in
+order. There are too many to digest at once. Condense them into FEWER, higher-level key
+points as a JSON array — merge related points, keep concrete facts, numbers and
+conclusions, preserve the original order, and do not add commentary or speculation.
+
+Group {n} of {total}:
+
+--- KEY POINTS ---
+{text}
+--- END KEY POINTS ---
+"""
+
 REDUCE_PROMPT = """\
 Below are key points extracted from a long document, in order, section by section. Write \
 the summary of the WHOLE document from them.
@@ -145,11 +158,37 @@ def _map_reduce(settings: Settings, doc: Document, budget_chars: int) -> Summary
         elapsed += secs
         points.extend(str(p).strip() for p in data.get("points", []) if str(p).strip())
 
-    # The reduce input must itself fit. If the key points overflow (a very long document),
-    # trim them rather than letting Ollama truncate silently.
-    joined, dropped = _fit_to_context("\n".join(f"- {p}" for p in points), settings)
-    if len(joined) > budget_chars:
-        joined = joined[:budget_chars]
+    # The reduce input must itself fit. When the key points overflow (a very long
+    # document), COLLAPSE them recursively — condense point-groups through the model
+    # until everything fits — rather than trimming. Trimming dropped the tail sections'
+    # points, which meant the summary quietly thinned toward the end of the document
+    # (measured: 8,992 chars cut on a 72-page, 9-section PDF). Coverage of the whole
+    # document matters more here than per-point resolution: the full-detail paths are
+    # the /scribe skill and the TTS pipeline, not this summary.
+    joined = "\n".join(f"- {p}" for p in points)
+    rounds = 0
+    while len(joined) > budget_chars and rounds < 3:
+        groups = chunk(joined, settings.chunk_chars)
+        collapsed: list[str] = []
+        for n, piece in enumerate(groups, start=1):
+            data, secs = chat_structured(
+                settings,
+                COLLAPSE_PROMPT.format(n=n, total=len(groups), text=piece),
+                MAP_SCHEMA,
+            )
+            elapsed += secs
+            collapsed.extend(str(p).strip() for p in data.get("points", []) if str(p).strip())
+        rejoined = "\n".join(f"- {p}" for p in collapsed)
+        if not collapsed or len(rejoined) >= len(joined):
+            # A round that fails to shrink would loop forever; fall through to the trim.
+            break
+        joined = rejoined
+        rounds += 1
+
+    # Safety net for the depth cap or a non-converging collapse. With ~10x condensation
+    # per round this should never fire on real input, but Ollama truncates silently, so
+    # an unguarded overflow would be invisible.
+    joined, dropped = _fit_to_context(joined, settings)
     data, secs = chat_structured(
         settings, REDUCE_PROMPT.format(source=doc.source, points=joined), SCHEMA
     )
