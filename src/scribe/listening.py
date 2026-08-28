@@ -139,8 +139,11 @@ def _document_hygiene(text: str) -> str:
 
 # End matter: nobody wants a bibliography narrated. Everything from the first of these
 # headings onward is dropped — in articles they only appear as trailing sections.
+# The '#' is OPTIONAL: a PDF text layer has no markdown, so its bibliography is a
+# bare "References" line — and narrating a bibliography is the single worst thing
+# this pipeline could do to a listener.
 _END_MATTER = re.compile(
-    r"^#{1,6}\s*(?:references|external links|see also|further reading|bibliography|"
+    r"^\s*#{0,6}\s*(?:references|external links|see also|further reading|bibliography|"
     r"notes|footnotes|works cited)\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
@@ -164,12 +167,23 @@ _STRAY_BRACKET = re.compile(r"[\[\]]")
 _OPEN_SENTINEL, _CLOSE_SENTINEL = "\x00", "\x01"
 
 
-def clean_for_listening(text: str) -> str:
-    """Strip what is painful to hear; keep every sentence the author wrote."""
+def prepare_document(text: str) -> str:
+    """Document-level pass: hygiene, then cut everything from the end matter on.
+
+    Separate from the body pass so heading detection can run on text that still HAS
+    its headings — the body pass turns them into spoken sentences, which destroys the
+    structure chapters are built from.
+    """
     text = _document_hygiene(text)
     m = _END_MATTER.search(text)
-    if m:
-        text = text[: m.start()]
+    return text[: m.start()] if m else text
+
+
+def clean_body(text: str) -> str:
+    """Body pass: strip what is painful to hear; keep every sentence the author wrote.
+
+    Safe to run per-section: every rule here is local to the text it is given.
+    """
     text = _FENCE.sub(" Code example omitted. ", text)
     text = _EDIT_LINK.sub("", text)
     text = _EDIT_MARKER.sub("", text)
@@ -202,6 +216,11 @@ def clean_for_listening(text: str) -> str:
     text = _MULTI_SPACE.sub(" ", text)
     text = _MULTI_BLANK.sub("\n\n", text)
     return text.strip()
+
+
+def clean_for_listening(text: str) -> str:
+    """Full cleaning pipeline for a whole document."""
+    return clean_body(prepare_document(text))
 
 
 def split_segments(text: str, max_chars: int) -> list[str]:
@@ -297,22 +316,177 @@ def lint_script(chapters: list[Chapter]) -> list[str]:
     return findings
 
 
+# --- Structure detection (scribe#3) ---------------------------------------------
+# Chapters follow the source's own sections, so a textbook chapter arrives as
+# tappable sections in the player instead of one 40-minute block.
+
+_MD_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
+# "3.2 Decidability", "Chapter 4", "IV. Results" — numbering is the strongest signal
+# a PDF text layer offers, since it carries no heading markup at all.
+_NUMBERED_HEADING = re.compile(
+    r"^\s*(?:(?:chapter|section|part)\s+)?"
+    r"(?:\d+(?:\.\d+){0,2}\.?|[IVXLC]{1,6}\.)"
+    r"\s+(\S.{0,78})$",
+    re.IGNORECASE,
+)
+
+# A chapter shorter than this is not worth a player entry — it merges into its
+# predecessor. ~700 chars is roughly 45 seconds of speech.
+_MIN_CHAPTER_CHARS = 700
+# Beyond this the chapter list stops being navigation and becomes a wall.
+_MAX_CHAPTERS = 20
+
+
+def _looks_like_pdf_heading(line: str) -> bool:
+    """Heuristic heading test for text layers that carry no markup.
+
+    Deliberately strict: a false positive splits a paragraph mid-thought and puts a
+    chapter marker inside a sentence, which is worse than a missed heading (whose
+    only cost is a longer chapter).
+    """
+    s = line.strip()
+    if not (3 <= len(s) <= 80) or s.endswith((".", ",", ";", ":", "?", "!")):
+        return False
+    # Mostly-letters test, before anything else: it is what separates a heading from
+    # a table row or a formula. ") O(1) O(logk(n))" scores 0.53 and is rejected;
+    # "3.2 Decidability" scores 0.81 and survives.
+    if sum(c.isalpha() or c.isspace() for c in s) / len(s) < 0.75:
+        return False
+    if _NUMBERED_HEADING.match(s):
+        return True
+    words = s.split()
+    if not (1 <= len(words) <= 10):
+        return False
+    # ALL CAPS, or Title Case with no lowercase-only leading word.
+    if s.isupper():
+        return True
+    return all(w[0].isupper() or not w[0].isalpha() for w in words) and any(
+        w[0].isupper() for w in words
+    )
+
+
+def detect_sections(text: str) -> list[tuple[str, str]]:
+    """Split prepared text into (heading, body) sections, or [] if it has no structure.
+
+    Markdown headings win when present (the web path keeps them); the PDF heuristic is
+    the fallback. Returns [] rather than guessing when nothing is confident enough —
+    the caller then produces today's single "Full article" chapter.
+    """
+    headings = list(_MD_HEADING.finditer(text))
+    if headings:
+        # Coarsest level that actually divides the document. The `# Title` line is
+        # usually alone at level 1, so this naturally lands on `##`.
+        by_level: dict[int, list[re.Match[str]]] = {}
+        for m in headings:
+            by_level.setdefault(len(m.group(1)), []).append(m)
+        for level in sorted(by_level):
+            if len(by_level[level]) >= 2:
+                marks = by_level[level]
+                sections = []
+                # Text before the FIRST heading is the article's lead — dropping it
+                # would silently lose the opening paragraphs (and on Wikipedia, the
+                # definition itself). Any higher-level heading in there is the
+                # document title, which the summary chapter already announced.
+                lead = _MD_HEADING.sub("", text[: marks[0].start()]).strip()
+                if lead:
+                    sections.append(("Introduction", lead))
+                for i, m in enumerate(marks):
+                    end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
+                    sections.append((m.group(2).strip(), text[m.end(): end].strip()))
+                return sections
+        return []
+
+    lines = text.splitlines()
+
+    def _starts_a_section(i: int) -> bool:
+        if not _looks_like_pdf_heading(lines[i]):
+            return False
+        prev = lines[i - 1].strip() if i else ""
+        at_break = not prev or prev.endswith((".", "!", "?", '."', '.”'))
+        if not at_break:
+            return False
+        # Numbering is a strong enough signal to stand on a paragraph break alone.
+        # Bare title case is not — a capitalized sentence fragment wrapped onto its
+        # own line looks identical — so it still requires a real blank line.
+        return bool(_NUMBERED_HEADING.match(lines[i].strip())) or not prev
+
+    marks = [i for i in range(len(lines)) if _starts_a_section(i)]
+    if len(marks) < 2:
+        return []
+    sections = []
+    lead = "\n".join(lines[: marks[0]]).strip()
+    if lead:
+        sections.append(("Introduction", lead))
+    for n, i in enumerate(marks):
+        end = marks[n + 1] if n + 1 < len(marks) else len(lines)
+        sections.append((lines[i].strip(), "\n".join(lines[i + 1: end]).strip()))
+    return sections
+
+
+def _chapter_title(heading: str) -> str:
+    """Player-friendly chapter label: cleaned of markup, truncated at a word."""
+    label = clean_body(heading).rstrip(".").strip() or heading.strip()
+    if len(label) <= 60:
+        return label
+    return label[:60].rsplit(" ", 1)[0] + "..."
+
+
+def _consolidate(sections: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Merge runs too short to be worth a chapter, then cap the total.
+
+    A merged chapter keeps the FIRST heading as its title and the later headings stay
+    in the spoken text, so nothing is lost to the listener — only the player's
+    navigation list is coarsened.
+    """
+    merged: list[tuple[str, str]] = []
+    for title, body in sections:
+        if merged and len(body) < _MIN_CHAPTER_CHARS:
+            prev_title, prev_body = merged[-1]
+            merged[-1] = (prev_title, f"{prev_body}\n\n{title}.\n\n{body}".strip())
+        else:
+            merged.append((title, body))
+
+    while len(merged) > _MAX_CHAPTERS:
+        # Fold the shortest chapter into its neighbour until the list fits.
+        i = min(range(1, len(merged)), key=lambda n: len(merged[n][1]))
+        title, body = merged.pop(i)
+        prev_title, prev_body = merged[i - 1]
+        merged[i - 1] = (prev_title, f"{prev_body}\n\n{title}.\n\n{body}".strip())
+    return merged
+
+
 def build_script(doc: Document, summary: Summary, *, max_chars: int) -> list[Chapter]:
     """Summary chapter first, then the article — the agreed listening order."""
     title = (doc.title or summary.title or "Untitled").strip()
     summary_text = clean_for_listening(
         f"{title}.\n\nSummary.\n\n{summary.tldr}\n\n{summary.summary}"
     )
-    article_text = clean_for_listening(doc.text)
     chapters = [Chapter("Summary", split_segments(summary_text, max_chars))]
+
+    prepared = prepare_document(doc.text)
+    sections = _consolidate(detect_sections(prepared))
+    lead = "End of summary. The full article begins now."
+
+    if len(sections) >= 2:
+        for n, (heading, body) in enumerate(sections):
+            # The heading is spoken at the top of its own chapter — a listener who
+            # jumps to a chapter should hear what it is.
+            spoken = clean_body(f"{heading}.\n\n{body}")
+            if not spoken:
+                continue
+            if n == 0:
+                spoken = f"{lead}\n\n{spoken}"
+            chapters.append(
+                Chapter(_chapter_title(heading), split_segments(spoken, max_chars))
+            )
+        # Every section cleaned away to nothing: fall through to the flat chapter
+        # rather than shipping a summary-only audiobook.
+        if len(chapters) > 1:
+            return chapters
+
+    article_text = clean_body(prepared)
     if article_text:
         chapters.append(
-            Chapter(
-                "Full article",
-                split_segments(
-                    f"End of summary. The full article begins now.\n\n{article_text}",
-                    max_chars,
-                ),
-            )
+            Chapter("Full article", split_segments(f"{lead}\n\n{article_text}", max_chars))
         )
     return chapters
