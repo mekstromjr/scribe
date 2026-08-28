@@ -18,6 +18,23 @@ class TTSError(RuntimeError):
     pass
 
 
+def voices(settings: Settings) -> list[str]:
+    """English voice ids the server actually serves.
+
+    Asked rather than hardcoded so /scribevoice can reject a typo at command time
+    instead of at synthesis time, tens of minutes later.
+    """
+    try:
+        resp = httpx.get(f"{settings.tts_host}/v1/audio/voices", timeout=15.0)
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise TTSError(f"cannot list voices at {settings.tts_host}: {exc}") from exc
+    raw = resp.json().get("voices", [])
+    names = [v.get("id", v.get("name", "")) if isinstance(v, dict) else str(v) for v in raw]
+    # Kokoro prefixes by language and gender: a=American, b=British.
+    return sorted(n for n in names if n[:3] in ("af_", "am_", "bf_", "bm_"))
+
+
 def health(settings: Settings) -> None:
     try:
         resp = httpx.get(f"{settings.tts_host}/health", timeout=10.0)
