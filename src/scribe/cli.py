@@ -156,6 +156,13 @@ def _cmd_listen(args: argparse.Namespace) -> int:
             max_chars=settings.tts_max_chars,
         )
         findings = lint_script(chapters)
+        # Chapter plan first and on stderr: the structure is the thing worth checking
+        # at a glance, and it stays visible when the script itself is piped away.
+        print(f"chapter plan ({len(chapters)}):", file=sys.stderr)
+        for ch in chapters:
+            chars = sum(len(s) for s in ch.segments)
+            print(f"  - {ch.title}  [{len(ch.segments)} segment(s), {chars} chars]",
+                  file=sys.stderr)
         for ch in chapters:
             print(f"===== chapter: {ch.title} ({len(ch.segments)} segment(s)) =====")
             for seg in ch.segments:
