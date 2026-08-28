@@ -159,7 +159,10 @@ class Settings(BaseSettings):
     # In-cluster API endpoint vs the public link put in notes and Slack replies. The
     # API talks service-to-service; the link must open on a phone.
     abs_api_url: str = "http://audiobookshelf.prod.svc.cluster.local:80"
-    abs_web_url: str = "https://audiobookshelf.meklab.net"
+    # shelf.meklab.net, NOT audiobookshelf.meklab.net — the ingress host is "shelf"
+    # (apps/audiobookshelf/ingress.yaml); the longer name has no DNS record and every
+    # link built from it was dead on arrival.
+    abs_web_url: str = "https://shelf.meklab.net"
     abs_library_name: str = "Articles"
     # Vault: secret/infra/scribe property abs-token.
     abs_token: str = ""
