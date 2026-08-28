@@ -380,6 +380,10 @@ def _submit(settings: Settings, pool: ThreadPoolExecutor, pending: _Pending,
 
 def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
     app = App(token=settings.slack_bot_token)
+    # Needed to recognize our own @-mentions inside drop channels: a mention there fires
+    # BOTH app_mention and message.channels for the same message, and handling both
+    # would summarize the document twice.
+    bot_user_id = app.client.auth_test().get("user_id", "")
     # One worker: the model server is the bottleneck and handles one request at a time.
     # Parallel documents would not finish sooner, only thrash a shared bottleneck.
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="scribe")
@@ -481,9 +485,21 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
 
     @app.event("message")
     def on_message(event, say, client):
-        # Only DMs; channel messages arrive via app_mention so we never read traffic we
-        # were not addressed in.
+        # DMs always; channels only when allowlisted as a DROP CHANNEL (every link or
+        # file processed, no mention needed — SCRIBE_DROP_CHANNELS). Other channels stay
+        # mention-only via app_mention, so inviting scribe somewhere for @-mentions never
+        # turns that channel into a firehose.
         if event.get("channel_type") == "im":
+            handle(event, say, client)
+            return
+        if (
+            event.get("channel_type") == "channel"
+            and event.get("channel") in settings.drop_channel_ids
+        ):
+            # A mention in a drop channel also arrives as app_mention — that handler owns
+            # it. Without this check the same message would be processed twice.
+            if bot_user_id and f"<@{bot_user_id}>" in (event.get("text") or ""):
+                return
             handle(event, say, client)
 
     # Resume anything the previous run did not finish, in the order it arrived. Each

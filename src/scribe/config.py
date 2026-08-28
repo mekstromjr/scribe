@@ -76,6 +76,16 @@ class Settings(BaseSettings):
     # more chunks is more expensive than bigger chunks.
     chunk_chars: int = 24000
 
+    # Comma-separated Slack channel IDs where EVERY link or file is processed without
+    # an @-mention (a "drop channel"). Everywhere else channels stay mention-only —
+    # membership alone must not turn a discussion channel into a firehose, and the
+    # message.channels subscription delivers every channel scribe is a member of.
+    drop_channels: str = ""
+
+    @property
+    def drop_channel_ids(self) -> set[str]:
+        return {c.strip() for c in self.drop_channels.split(",") if c.strip()}
+
     # --- ETA shown in the Slack ack -------------------------------------------------
     # All three MEASURED on insp1 (CT 260) on 2026-08-27, not derived. They are host
     # constants: rehoming ollama means re-measuring them, like num_thread.
