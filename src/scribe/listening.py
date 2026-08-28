@@ -15,6 +15,7 @@ chapter markers — one tap in the Audiobookshelf player replays or skips the su
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 
 from scribe.document import Document
@@ -64,6 +65,78 @@ _CAPTION = re.compile(
 _MULTI_BLANK = re.compile(r"\n{3,}")
 _MULTI_SPACE = re.compile(r"[ \t]{2,}")
 
+# --- Document hygiene -----------------------------------------------------------
+# Ported from Michael's pre-scribe TTS pipeline (MekVault/Misc/Scripts/tts-pipeline,
+# text_cleaner.py) — rules battle-tested against exactly the junk that made Speech
+# Central unbearable: journal boilerplate, page furniture, photo credits. Curated:
+# the chart-data heuristics and aggressive line-rejoining stayed behind (higher
+# false-positive risk than their payoff here, where extraction is already cleaner).
+_HYGIENE_LINE_RULES = [
+    # PDF page furniture
+    re.compile(r"^\s*\d+/\d+\s*$", re.MULTILINE),                      # "3/54"
+    re.compile(r"^\s*Page\s+\d+(?:\s+of\s+\d+)?\s*$", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"^\s*-\s*\d+\s*-\s*$", re.MULTILINE),                  # "- 12 -"
+    re.compile(r"^\s*\d{1,3}\s*$", re.MULTILINE),                      # bare page number
+    re.compile(r"^\s*\d{1,2}/\d{1,2}/\d{2,4}\s*$", re.MULTILINE),     # print-dialog date
+    # Journal boilerplate
+    re.compile(r"^\s*VOL\.?\s+\d+\s+ISSUE\s+\d+.*$", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"^\s*Downloaded from\s+\S+.*$", re.MULTILINE | re.IGNORECASE),
+    re.compile(
+        r"^\s*Published by\s+(?:American Association|AAAS|Wiley|Elsevier|Springer|Nature).*$",
+        re.MULTILINE | re.IGNORECASE,
+    ),
+    re.compile(r"^\s*(?:Copyright|©|\(c\))\s+\d{4}.*$", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"^\s*All rights reserved\.?\s*$", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"^\s*Reprints?\s+and\s+[Pp]ermissions?.*$", re.MULTILINE),
+    re.compile(
+        r"^\s*\*?\s*(?:Corresponding author|To whom correspondence).*$",
+        re.MULTILINE | re.IGNORECASE,
+    ),
+    re.compile(r"^\s*[\w.+-]+@[\w-]+\.[\w.-]+\s*$", re.MULTILINE),     # email-only line
+    # Image furniture beyond the caption rule
+    re.compile(
+        r"^\s*(?:PHOTOGRAPH|PHOTO|IMAGE|ILLUSTRATION)\s*(?:BY|:)\s*.*$",
+        re.MULTILINE | re.IGNORECASE,
+    ),
+    re.compile(r"^\s*(?:A\s+)?[Ss]creenshot\s+(?:from|of)\s+.*$", re.MULTILINE),
+    re.compile(r"^\s*Fig(?:ure)?\.?\s+\d+.*$", re.MULTILINE | re.IGNORECASE),
+    # Web furniture
+    re.compile(r"^\s*\d+\s*COMMENTS?\s*$", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"^\s*(?:SUBSCRIBE|Sign up for our newsletter\b.*)$", re.MULTILINE),
+]
+_HYGIENE_INLINE_RULES = [
+    re.compile(r"\(cid:\d+\)"),                                        # PDF cid refs
+    re.compile(r"ISSN\s*[\d\-Xx]+", re.IGNORECASE),
+    re.compile(r"(?:doi|DOI)[:\s]+10\.\d{4,}/\S+"),
+    re.compile(r"\d{1,2}/\d{1,2}/\d{2,4},\s*\d{1,2}:\d{2}\s*[AP]M", re.IGNORECASE),
+    re.compile(r"\b\w+\.(?:jpg|jpeg|png|gif|svg|webp)\b", re.IGNORECASE),
+]
+_HYPHEN_BREAK = re.compile(r"([a-z])-\s*\n\s*([a-z])")
+_REPEAT_HEADER_THRESHOLD = 3
+
+
+def _document_hygiene(text: str) -> str:
+    """Strip page furniture, journal boilerplate, and credit lines; heal hyphenation.
+
+    Repeated-header removal first: a running header repeated on every page would
+    otherwise be spoken dozens of times, and it is only detectable by counting —
+    no single line looks wrong in isolation.
+    """
+    counts = Counter(line.strip() for line in text.splitlines() if line.strip())
+    repeated = {
+        line for line, n in counts.items()
+        if n >= _REPEAT_HEADER_THRESHOLD and len(line) > 3
+    }
+    if repeated:
+        text = "\n".join(
+            line for line in text.splitlines() if line.strip() not in repeated
+        )
+    for rule in _HYGIENE_LINE_RULES:
+        text = rule.sub("", text)
+    for rule in _HYGIENE_INLINE_RULES:
+        text = rule.sub("", text)
+    return _HYPHEN_BREAK.sub(r"\1\2", text)
+
 # End matter: nobody wants a bibliography narrated. Everything from the first of these
 # headings onward is dropped — in articles they only appear as trailing sections.
 _END_MATTER = re.compile(
@@ -93,6 +166,7 @@ _OPEN_SENTINEL, _CLOSE_SENTINEL = "\x00", "\x01"
 
 def clean_for_listening(text: str) -> str:
     """Strip what is painful to hear; keep every sentence the author wrote."""
+    text = _document_hygiene(text)
     m = _END_MATTER.search(text)
     if m:
         text = text[: m.start()]
