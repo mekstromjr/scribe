@@ -474,7 +474,7 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
         ahead_n, ahead_seconds = pending.add(est)
         queued = f" It is queued behind {ahead_n} other item(s)." if ahead_n else ""
         say(
-            text=f"On it — {job.source_label}. {eta_line(est + ahead_seconds)}{queued}",
+            text=f"On it — {job.source_label}. {eta_line(settings, est + ahead_seconds)}{queued}",
             thread_ts=thread_ts,
         )
         _submit(settings, pool, pending, active, client, job, est)
@@ -514,7 +514,7 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
                 channel=job.channel,
                 thread_ts=job.thread_ts,
                 text=f"Picking this back up after a restart — {job.source_label}. "
-                     f"{eta_line(est + ahead_seconds)}",
+                     f"{eta_line(settings, est + ahead_seconds)}",
             )
         except Exception:
             log.exception("could not notify resume for %s", job.id)

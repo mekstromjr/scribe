@@ -16,8 +16,9 @@ constant, which is right for nearly every article.
 from __future__ import annotations
 
 import math
-import time
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pypdfium2 as pdfium
 
@@ -94,14 +95,15 @@ def estimate_seconds(settings: Settings, target: str) -> int:
         return round(_model_seconds(settings, _budget_chars(settings)))
 
 
-def eta_line(total_seconds: float) -> str:
-    """One Slack-formatted sentence: absolute time in the READER's timezone.
+def eta_line(settings: Settings, total_seconds: float) -> str:
+    """One sentence with a 24-hour clock in the configured timezone.
 
-    The <!date^...^{time}|fallback> token renders client-side, so the same message shows
-    4:32 PM to a viewer in Chicago and 2:32 PM to one in Seattle. The fallback is a
-    duration because clients that cannot render the token cannot be assumed to share a
-    timezone either.
+    Slack's <!date^...^{time}> token renders viewer-local but only in 12-hour format,
+    and there is no 24-hour variant — so the clock is rendered server-side in
+    settings.timezone instead. An ETA that lands on a different calendar day says so,
+    or "23:58" quoted at 23:50 would read as fourteen hours away.
     """
-    done = int(time.time() + total_seconds)
-    minutes = max(1, round(total_seconds / 60))
-    return f"Estimated completion: <!date^{done}^{{time}}|in about {minutes} min>."
+    now = datetime.now(tz=ZoneInfo(settings.timezone))
+    done = now + timedelta(seconds=total_seconds)
+    day = " tomorrow" if done.date() != now.date() else ""
+    return f"Estimated completion: {done:%H:%M}{day}."
