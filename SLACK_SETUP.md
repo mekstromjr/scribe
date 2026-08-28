@@ -57,3 +57,18 @@ privacy boundary for a bot that forwards content into a personal vault.
 `socket_mode_enabled: true` is load-bearing: Slack cannot reach this network (the
 cluster is behind Tailscale CGNAT with no public ingress), so an outbound WebSocket is
 what makes a Slack integration possible at all without exposing anything.
+
+## Slash commands and the audio upload (scribe#2, home#174)
+
+The app manifest declares four slash commands (`/scribevoice`, `/scribetoggleobs`,
+`/scribetoggletts`, `/scribeconfig`) and two extra scopes: `commands` for the slash
+commands and `files:write` so scribe can post the generated `.m4b` into the thread.
+
+If the app already exists, applying an updated manifest is not enough on its own —
+**Slack requires a reinstall to grant newly added scopes**. In the app's settings:
+
+1. **App Manifest** -> paste the current `manifest.json` -> Save Changes.
+2. **Install App** -> Reinstall to Workspace -> Allow.
+
+Until the reinstall happens, the commands answer with a `not_authed`-style failure and
+audio is posted as a link instead of a file (scribe degrades to that on purpose).

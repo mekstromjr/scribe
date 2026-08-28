@@ -31,7 +31,9 @@ from scribe.extract import ExtractionError, extract
 from scribe.note import note_title, obsidian_uri, render, slugify
 from scribe.ollama import OllamaError
 from scribe.queue import Job, complete, enqueue, restore, spool
+from scribe.runtime_config import effective, set_value
 from scribe.summarize import summarize
+from scribe.tts import TTSError, voices
 from scribe.vault import VaultError, append_listen_link, publish, resolve_attachment
 
 log = logging.getLogger("scribe.slack")
@@ -181,6 +183,7 @@ def _audio_stage(settings: Settings, client, job: Job, doc, summary, note_path: 
     the file to Slack, a Slack upload failure still leaves the ABS link, and a vault
     hiccup loses only the note's listen line.
     """
+    settings = effective(settings)
     title = note_title(doc, summary)
     author = doc.source if doc.kind == "link" else "scribe"
     try:
@@ -204,10 +207,12 @@ def _audio_stage(settings: Settings, client, job: Job, doc, summary, note_path: 
             log.warning("ABS upload failed for %s: %s", job.source_label, exc)
             abs_line = f"_(Audiobookshelf upload failed: {exc})_"
         else:
-            try:
-                append_listen_link(settings, note_path, link)
-            except VaultError as exc:
-                log.warning("listen-link commit failed for %s: %s", note_path, exc)
+            # No note to link when vault publishing is off.
+            if note_path:
+                try:
+                    append_listen_link(settings, note_path, link)
+                except VaultError as exc:
+                    log.warning("listen-link commit failed for %s: %s", note_path, exc)
 
         try:
             # files_upload_v2 needs files:write; posted into the same thread so the
@@ -231,6 +236,10 @@ def _audio_stage(settings: Settings, client, job: Job, doc, summary, note_path: 
 def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
              active: _Active | None = None) -> None:
     """Run the pipeline and reply in-thread. Never raises — failures are reported to Slack."""
+    # Runtime overrides are read ONCE, here, at the start of the job: a toggle typed
+    # while this document is mid-flight applies to the next one, so a job's behavior
+    # never changes underneath the ack the user already received.
+    settings = effective(settings)
     local_file = Path(job.attachment) if job.attachment else None
     requeued = False
 
@@ -255,22 +264,24 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
         # Publishing is the point of no return: past here the note exists and cancel
         # would leave more mess than it saves.
         abort()
-        attachment_path = (
-            resolve_attachment(settings, local_file, job.attachment_name)
-            if local_file
-            else None
-        )
-        body = render(doc, summary, model=settings.text_model, attachment_link=attachment_path)
-        result = publish(
-            settings,
-            note_body=body,
-            note_stem=slugify(note_title(doc, summary)),
-            attachment=local_file,
-            attachment_path=attachment_path,
-        )
+        result = {"note": ""}
+        if settings.vault_enabled:
+            attachment_path = (
+                resolve_attachment(settings, local_file, job.attachment_name)
+                if local_file
+                else None
+            )
+            body = render(
+                doc, summary, model=settings.text_model, attachment_link=attachment_path
+            )
+            result = publish(
+                settings,
+                note_body=body,
+                note_stem=slugify(note_title(doc, summary)),
+                attachment=local_file,
+                attachment_path=attachment_path,
+            )
 
-        note_name = Path(result["note"]).stem
-        uri = obsidian_uri(settings.obsidian_vault_name, result["note"])
         lines = [
             f"*{note_title(doc, summary)}*",
             # The source is repeated in the body, not just implied by the thread: Slack
@@ -281,11 +292,16 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
             "",
             summary.tldr,
             "",
+        ]
+        if settings.vault_enabled:
+            note_name = Path(result["note"]).stem
+            uri = obsidian_uri(settings.obsidian_vault_name, result["note"])
             # Deep link rather than just the name: tapping it opens the note directly
             # in Obsidian on phone or laptop, which is the whole point of a read-later
             # queue. Slack renders <uri|label>.
-            f"Saved to your vault: <{uri}|{note_name}>",
-        ]
+            lines.append(f"Saved to your vault: <{uri}|{note_name}>")
+        else:
+            lines.append("_Vault publishing is off — this summary lives only here._")
         if summary.sections > 1:
             lines.append(
                 f"_Long document — summarized in {summary.sections} sections, so this "
@@ -409,8 +425,86 @@ def _submit(settings: Settings, pool: ThreadPoolExecutor, pending: _Pending,
     fut.add_done_callback(_done)
 
 
+def _register_config_commands(app: App, settings: Settings) -> None:
+    """Slash commands for on-the-fly configuration (scribe#2).
+
+    Changes take effect for jobs started after the command; anything already running
+    finishes under the settings it began with, so a mid-queue toggle cannot produce a
+    half-configured document.
+    """
+
+    def _state_line(s: Settings) -> str:
+        return (
+            f"voice *{s.tts_voice}* · vault *{'on' if s.vault_enabled else 'off'}* · "
+            f"TTS *{'on' if s.tts_enabled else 'off'}*"
+        )
+
+    @app.command("/scribevoice")
+    def on_voice(ack, respond, command):
+        ack()
+        current = effective(settings)
+        wanted = (command.get("text") or "").strip()
+        try:
+            available = voices(current)
+        except TTSError as exc:
+            respond(f"Couldn't reach the TTS server to list voices: {exc}")
+            return
+        if not wanted:
+            listing = "\n".join(
+                f"• `{v}`{'  ← current' if v == current.tts_voice else ''}"
+                for v in available
+            )
+            respond(f"Current voice: *{current.tts_voice}*\n\n{listing}")
+            return
+        if wanted not in available:
+            near = [v for v in available if wanted.lower() in v.lower()]
+            hint = f" Did you mean {', '.join(f'`{v}`' for v in near[:3])}?" if near else ""
+            respond(f"`{wanted}` is not a voice this server serves.{hint}")
+            return
+        set_value(settings, "tts_voice", wanted)
+        respond(
+            f"Voice set to *{wanted}* for the next document. "
+            f"{_state_line(effective(settings))}"
+        )
+
+    def _toggle(key: str, label: str, respond, command) -> None:
+        current = effective(settings)
+        arg = (command.get("text") or "").strip().lower()
+        # An explicit on/off is idempotent; bare invocation flips. Both are useful —
+        # flipping is fastest from a phone, explicit is safe in a script.
+        if arg in {"on", "off"}:
+            new = arg == "on"
+        elif arg:
+            respond(f"Use `on`, `off`, or no argument to flip. {_state_line(current)}")
+            return
+        else:
+            new = not getattr(current, key)
+        set_value(settings, key, new)
+        after = effective(settings)
+        note = ""
+        if not after.vault_enabled and not after.tts_enabled:
+            note = "\n_Both outputs are off — documents will only get a TL;DR in thread._"
+        respond(f"{label} is now *{'on' if new else 'off'}*. {_state_line(after)}{note}")
+
+    @app.command("/scribetoggleobs")
+    def on_toggle_obs(ack, respond, command):
+        ack()
+        _toggle("vault_enabled", "Vault publishing", respond, command)
+
+    @app.command("/scribetoggletts")
+    def on_toggle_tts(ack, respond, command):
+        ack()
+        _toggle("tts_enabled", "TTS audio", respond, command)
+
+    @app.command("/scribeconfig")
+    def on_config(ack, respond, command):  # noqa: ARG001
+        ack()
+        respond(f"scribe: {_state_line(effective(settings))}")
+
+
 def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
     app = App(token=settings.slack_bot_token)
+    _register_config_commands(app, settings)
     # Needed to recognize our own @-mentions inside drop channels: a mention there fires
     # BOTH app_mention and message.channels for the same message, and handling both
     # would summarize the document twice.
