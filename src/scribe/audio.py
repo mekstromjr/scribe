@@ -15,7 +15,7 @@ from pathlib import Path
 
 from scribe.config import Settings
 from scribe.document import Document
-from scribe.listening import build_script
+from scribe.listening import build_script, lint_script
 from scribe.package import ChapterAudio, build_m4b
 from scribe.summarize import Summary
 from scribe.tts import synthesize_segment
@@ -39,6 +39,10 @@ def produce_audio(
 ) -> AudioResult:
     """Synthesize and package. Raises on failure — the caller decides how quiet to be."""
     chapters = build_script(doc, summary, max_chars=settings.tts_max_chars)
+    # Non-fatal: a slightly noisy audiobook beats no audiobook. Each finding names the
+    # cleaning rule that is missing.
+    for finding in lint_script(chapters):
+        log.warning("listening-script artifact (will be vocalized): %s", finding)
     workdir = tempfile.TemporaryDirectory(prefix="scribe-audio-")
     work = Path(workdir.name)
 
