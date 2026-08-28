@@ -62,6 +62,50 @@ class TestCleanForListening:
         assert "*" not in cleaned
         assert "bold item" in cleaned
 
+    def test_sup_blocks_vanish_with_their_contents(self):
+        # The first listening test vocalized "sup one" every few words — <sup> blocks
+        # are citation markers and must disappear entirely, not just lose their tags.
+        raw = 'stupid")<sup>[\\[1\\]](#cite_note-BRich-1)</sup> is a principle'
+        cleaned = clean_for_listening(raw)
+        assert "sup" not in cleaned
+        assert "1" not in cleaned
+        assert 'stupid") is a principle' in cleaned
+
+    def test_escaped_citation_links_are_removed(self):
+        raw = "in 1960.[\\[2\\]](#cite_note-TDal-2) First seen"
+        cleaned = clean_for_listening(raw)
+        assert "2" not in cleaned
+        assert "cite" not in cleaned
+        assert "in 1960. First seen" in cleaned
+
+    def test_angle_bracket_urls_are_removed(self):
+        cleaned = clean_for_listening("Johnson (<https://en.wikipedia.org/wiki/Kelly>).")
+        assert "http" not in cleaned
+        assert "Johnson" in cleaned
+
+    def test_letter_and_note_citations_are_removed_but_sic_stays(self):
+        cleaned = clean_for_listening("claim[a] and[note 3] but [sic] stays")
+        assert "[a]" not in cleaned
+        assert "[note 3]" not in cleaned
+        assert "[sic]" in cleaned
+
+    def test_inline_html_tags_lose_brackets_keep_text(self):
+        cleaned = clean_for_listening("a <em>stressed</em> word")
+        assert cleaned == "a stressed word"
+
+    def test_end_matter_sections_are_dropped(self):
+        text = "Real content.\n\n## See also\n\n- Related thing\n\n## References\n\n1. citation"
+        cleaned = clean_for_listening(text)
+        assert "Real content." in cleaned
+        assert "Related thing" not in cleaned
+        assert "citation" not in cleaned
+
+    def test_edit_markers_and_anchor_husks_are_removed(self):
+        cleaned = clean_for_listening("Heading\n\n[edit]\n\n(#citeref-BRich1-0)text")
+        assert "edit" not in cleaned
+        assert "cite" not in cleaned
+        assert "text" in cleaned
+
 
 class TestSplitSegments:
     def test_short_text_is_one_segment(self):

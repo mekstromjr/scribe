@@ -20,10 +20,24 @@ from dataclasses import dataclass
 from scribe.document import Document
 from scribe.summarize import Summary
 
+# HTML that survives extraction (trafilatura keeps some inline tags). <sup> blocks go
+# ENTIRELY — in extracted articles they are footnote/citation markers, and hearing
+# "sup one" every few words is what made the first test unlistenable. Other inline
+# tags lose only their brackets.
+_SUP = re.compile(r"<sup\b[^>]*>.*?</sup>", re.DOTALL | re.IGNORECASE)
+_HTML_TAG = re.compile(r"</?(?:sub|span|em|strong|i|b|u|small|br|a)\b[^>]*/?>", re.IGNORECASE)
+# trafilatura backslash-escapes literal brackets (citations arrive as
+# "[\[1\]](#cite_note-...)"); unescape FIRST so the link and citation rules see them.
+_ESCAPED_BRACKET = re.compile(r"\\([\[\]])")
+_ANGLE_URL = re.compile(r"<https?://[^>]+>")
+
 # Markdown constructs, in stripping order (images before links — an image IS a link
 # with a bang, and the link rule alone would leave its alt text plus a stray '!').
 _IMAGE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
-_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+# Label may be EMPTY: Wikipedia citations arrive as links whose label is itself a
+# bracketed marker ("[[2]](#cite_note-…)"), so the citation rule runs first, empties
+# the label, and this rule then swallows the husk.
+_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _BARE_URL = re.compile(r"https?://\S+")
 _FENCE = re.compile(r"```.*?```", re.DOTALL)
 _INLINE_CODE = re.compile(r"`([^`]*)`")
@@ -33,9 +47,11 @@ _BLOCKQUOTE = re.compile(r"^>\s?", re.MULTILINE)
 _LIST_MARKER = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+", re.MULTILINE)
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)
 
-# Citation/footnote markers: [1], [12], [^3] — but not [text], which the link rule
-# already reduced to its label.
-_CITATION = re.compile(r"\[\^?\d+\]")
+# Citation/footnote markers: [1], [12], [^3], [a], [note 4] — but not [sic]-style
+# bracketed words, which are the author's own text. Runs BEFORE the link rule: a
+# Wikipedia citation is a link whose label is the marker ("[[1]](#cite_note-…)"), and
+# removing the marker first leaves an empty-labeled link the link rule then swallows.
+_CITATION = re.compile(r"\[\^?(?:\d+|[a-z]|note \d+)\]", re.IGNORECASE)
 
 # Caption-ish lines. Anchored to line start and short lines only: an article ABOUT
 # photography legitimately starts sentences with "Photo" mid-paragraph; a caption is a
@@ -48,14 +64,40 @@ _CAPTION = re.compile(
 _MULTI_BLANK = re.compile(r"\n{3,}")
 _MULTI_SPACE = re.compile(r"[ \t]{2,}")
 
+# End matter: nobody wants a bibliography narrated. Everything from the first of these
+# headings onward is dropped — in articles they only appear as trailing sections.
+_END_MATTER = re.compile(
+    r"^#{1,6}\s*(?:references|external links|see also|further reading|bibliography|"
+    r"notes|footnotes|works cited)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+# Wikipedia section-edit markers — bare, or as a full "[[edit](…index.php?…)]" link —
+# and the parenthesized husks of anchor-only links. Empty brackets are what remains
+# after a citation is stripped out of a link label; they must go too or the voice
+# gets a spurious pause-and-click where the marker was.
+_EDIT_LINK = re.compile(r"\[?\[edit\]\([^)]*\)\]?", re.IGNORECASE)
+_EDIT_MARKER = re.compile(r"\[edit\]", re.IGNORECASE)
+_ANCHOR_HUSK = re.compile(r"\(#[^)\s]*\)")
+_EMPTY_BRACKETS = re.compile(r"\[\s*\]")
+
 
 def clean_for_listening(text: str) -> str:
     """Strip what is painful to hear; keep every sentence the author wrote."""
+    m = _END_MATTER.search(text)
+    if m:
+        text = text[: m.start()]
     text = _FENCE.sub(" Code example omitted. ", text)
+    text = _EDIT_LINK.sub("", text)
+    text = _EDIT_MARKER.sub("", text)
+    text = _ANCHOR_HUSK.sub("", text)
+    text = _SUP.sub("", text)
+    text = _HTML_TAG.sub("", text)
+    text = _ESCAPED_BRACKET.sub(r"\1", text)
+    text = _ANGLE_URL.sub("", text)
     text = _IMAGE.sub("", text)
+    text = _CITATION.sub("", text)
     text = _LINK.sub(r"\1", text)
     text = _BARE_URL.sub("", text)
-    text = _CITATION.sub("", text)
     text = _TABLE_ROW.sub("", text)
     text = _CAPTION.sub("", text)
     # Headings become spoken sentences: a pause-inducing period, not a hash.
@@ -66,6 +108,7 @@ def clean_for_listening(text: str) -> str:
     text = _EMPHASIS.sub(r"\2", text)
     text = _BLOCKQUOTE.sub("", text)
     text = _LIST_MARKER.sub("", text)
+    text = _EMPTY_BRACKETS.sub("", text)
     text = _MULTI_SPACE.sub(" ", text)
     text = _MULTI_BLANK.sub("\n\n", text)
     return text.strip()
