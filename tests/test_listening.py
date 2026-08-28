@@ -113,6 +113,52 @@ class TestCleanForListening:
         assert "text" in cleaned
 
 
+class TestDocumentHygiene:
+    """Rules ported from the pre-scribe tts-pipeline (MekVault/Misc/Scripts)."""
+
+    def test_repeated_page_headers_are_removed(self):
+        page = "The Journal of Important Things\n\nReal paragraph {n} content here."
+        text = "\n\n".join(page.format(n=n) for n in range(4))
+        cleaned = clean_for_listening(text)
+        assert "Journal of Important Things" not in cleaned
+        assert "Real paragraph 2 content here." in cleaned
+
+    def test_page_furniture_lines_vanish(self):
+        text = "Real sentence one.\n\n3/54\n\nPage 12 of 54\n\n- 7 -\n\n42\n\nReal sentence two."
+        cleaned = clean_for_listening(text)
+        for junk in ("3/54", "Page 12", "- 7 -"):
+            assert junk not in cleaned
+        assert "42" not in cleaned
+        assert "Real sentence one." in cleaned
+        assert "Real sentence two." in cleaned
+
+    def test_journal_boilerplate_vanishes(self):
+        text = ("Findings follow.\n\nDownloaded from science.org at MIT\n\n"
+                "Copyright 2024 AAAS\n\nDOI: 10.1126/science.abc123 continues")
+        cleaned = clean_for_listening(text)
+        assert "Downloaded from" not in cleaned
+        assert "Copyright" not in cleaned
+        assert "10.1126" not in cleaned
+        assert "Findings follow." in cleaned
+
+    def test_photo_credits_and_email_lines_vanish(self):
+        text = ("A real thought.\n\nPHOTOGRAPH BY ANNIE LEIBOVITZ\n\n"
+                "author@university.edu\n\nAnother real thought.")
+        cleaned = clean_for_listening(text)
+        assert "LEIBOVITZ" not in cleaned
+        assert "@university" not in cleaned
+        assert "Another real thought." in cleaned
+
+    def test_hyphenation_across_line_breaks_is_healed(self):
+        assert "understanding" in clean_for_listening("deep under-\nstanding of the topic")
+
+    def test_cid_refs_and_timestamps_vanish_inline(self):
+        cleaned = clean_for_listening("It was(cid:31) seen 1/30/26, 6:57 PM by all.")
+        assert "cid" not in cleaned
+        assert "6:57" not in cleaned
+        assert "It was seen" in cleaned
+
+
 class TestSplitSegments:
     def test_short_text_is_one_segment(self):
         assert split_segments("hello world", 100) == ["hello world"]
