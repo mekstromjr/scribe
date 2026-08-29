@@ -54,12 +54,20 @@ class TestLibraryResolution:
 
 
 class TestUpload:
-    def _wire(self, monkeypatch, items):
+    def _wire(self, monkeypatch, items, scan_raises=False):
         posts = []
         monkeypatch.setattr(abs_mod.time, "sleep", lambda s: None)
-        monkeypatch.setattr(
-            abs_mod.httpx, "post", lambda *a, **k: posts.append(k) or _Resp({})
-        )
+
+        def post(url, **k):
+            if url.endswith("/scan"):
+                if scan_raises:
+                    raise abs_mod.httpx.ConnectError("scan unavailable")
+                posts.append({**k, "_url": url})
+                return _Resp({})
+            posts.append({**k, "_url": url})
+            return _Resp({})
+
+        monkeypatch.setattr(abs_mod.httpx, "post", post)
 
         def get(url, **k):
             if url.endswith("/api/libraries"):
@@ -81,6 +89,25 @@ class TestUpload:
         # The upload targeted the Articles library and folder, resolved by name.
         assert posts[0]["data"]["library"] == "lib-art"
         assert posts[0]["data"]["folder"] == "f-2"
+
+    def test_triggers_a_scan_before_polling(self, settings, monkeypatch, tmp_path):
+        # ABS's own post-upload scan races the FUSE flush for large files (a 114 MB
+        # m4b sat unindexed for 30+ min on 2026-08-28), so we must ask explicitly.
+        items = [{"id": "item-9", "media": {"metadata": {"title": "My Article"}}}]
+        posts = self._wire(monkeypatch, items)
+        m4b = tmp_path / "a.m4b"
+        m4b.write_bytes(b"x")
+        upload(settings, m4b, title="My Article", author="scribe")
+        urls = [k.get("_url") for k in posts]
+        assert any(u and u.endswith("/api/libraries/lib-art/scan") for u in urls), urls
+
+    def test_scan_failure_does_not_lose_the_upload(self, settings, monkeypatch, tmp_path):
+        # The audio is already on disk; a scan hiccup must not fail the job.
+        items = [{"id": "item-9", "media": {"metadata": {"title": "My Article"}}}]
+        self._wire(monkeypatch, items, scan_raises=True)
+        m4b = tmp_path / "a.m4b"
+        m4b.write_bytes(b"x")
+        assert upload(settings, m4b, title="My Article", author="scribe").endswith("/item/item-9")
 
     def test_falls_back_to_the_library_link_rather_than_erroring(
         self, settings, monkeypatch, tmp_path
