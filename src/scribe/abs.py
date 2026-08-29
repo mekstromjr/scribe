@@ -6,12 +6,15 @@ public hostname, because the whole point of the link is opening on a phone.
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
 import httpx
 
 from scribe.config import Settings
+
+log = logging.getLogger("scribe.abs")
 
 
 class ABSError(RuntimeError):
@@ -80,8 +83,30 @@ def upload(settings: Settings, m4b: Path, *, title: str, author: str) -> str:
         raise ABSError(f"upload to Audiobookshelf failed: {exc}") from exc
 
     library_link = f"{settings.abs_web_url}/library/{library_id}"
-    for _ in range(10):
-        time.sleep(3.0)
+
+    # Ask for a scan explicitly rather than waiting for ABS to notice on its own.
+    #
+    # The library folder is an rclone FUSE mount (garage:media/articles), and FUSE
+    # does not deliver inotify events, so ABS's file watcher never fires for what we
+    # upload. ABS does scan after its own /api/upload, but that scan RACES the FUSE
+    # flush to Garage: measured 2026-08-28, a 114 MB m4b uploaded 200 OK and then sat
+    # unindexed for 30+ minutes, while 54 MB and 72 MB files on the same path indexed
+    # fine. A manual scan surfaced it in 6s. Big files are exactly the ones worth
+    # listening to, so this is not an edge case.
+    try:
+        httpx.post(
+            f"{settings.abs_api_url}/api/libraries/{library_id}/scan",
+            headers=_headers(settings),
+            timeout=60.0,
+        ).raise_for_status()
+    except httpx.HTTPError as exc:
+        # Non-fatal: the file is uploaded either way, and a later scan will find it.
+        log.warning("could not trigger an Audiobookshelf scan: %s", exc)
+
+    # Poll ~2.5 min, not 30s: the scan has to probe a large file THROUGH the FUSE
+    # mount, which is far slower than a local disk read.
+    for _ in range(30):
+        time.sleep(5.0)
         try:
             resp = httpx.get(
                 f"{settings.abs_api_url}/api/libraries/{library_id}/items",
@@ -96,4 +121,7 @@ def upload(settings: Settings, m4b: Path, *, title: str, author: str) -> str:
             meta = (item.get("media") or {}).get("metadata") or {}
             if meta.get("title") == title:
                 return f"{settings.abs_web_url}/item/{item['id']}"
+    # Still not indexed: the audio IS uploaded, so hand back the shelf rather than
+    # failing a job whose work is done.
+    log.warning("%r uploaded but not indexed in time — returning the library link", title)
     return library_link
