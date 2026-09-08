@@ -1,5 +1,9 @@
 # scribe
 
+> **Read-only mirror.** This project is developed on a self-hosted GitLab instance and
+> mirrored to GitHub for visibility. Issues and pull requests are not accepted here;
+> the mirror is overwritten on every push. Contact: see the profile of [@mekstromjr](https://github.com/mekstromjr).
+
 Send a link, PDF, or image to Slack; get a brief summary back in thread and a full note in
 the Obsidian vault with a thorough summary plus the complete extracted text.
 
