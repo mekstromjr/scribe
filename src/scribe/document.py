@@ -29,6 +29,9 @@ class Page(BaseModel):
     # (load_duration, eval_count, total_duration), so the API's own timings are unusable
     # and this is measured by the caller instead.
     seconds: float = 0.0
+    # Why a SKIPPED page was skipped, for the note's provenance line. A summary built
+    # from partial text should say what is missing and why, not just that something is.
+    reason: str | None = None
 
 
 class Document(BaseModel):

@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import time
+from dataclasses import dataclass
 
 import httpx
 
@@ -20,10 +21,30 @@ class OllamaError(RuntimeError):
     pass
 
 
+class OllamaTimeout(OllamaError):
+    """The request ran to the client deadline.
+
+    Distinct from unreachable: the server was up and working, it just never finished. For
+    OCR that means a runaway page, not an outage, so the caller should skip the page rather
+    than requeue the job -- at temperature 0 a retry reproduces the same hang (scribe#4).
+    """
+
+
+@dataclass(frozen=True)
+class VisionResult:
+    text: str
+    seconds: float
+    # False when ollama stopped at num_predict (done_reason "length") rather than because
+    # the model emitted its end token. For a transcription that means the model never
+    # reached the end of the page -- in practice a repetition loop on a sparse page, not a
+    # page too long to fit (the cap is 2x the densest page measured; see Settings).
+    complete: bool = True
+
+
 def generate_with_image(
     settings: Settings, prompt: str, image_bytes: bytes, *, model: str | None = None
-) -> tuple[str, float]:
-    """Run a vision prompt against one image. Returns (text, wall_clock_seconds).
+) -> VisionResult:
+    """Run a vision prompt against one image.
 
     Wall clock is measured here rather than read from the response because glm-ocr reports
     zero for load_duration/eval_count/eval_duration/total_duration — trusting those fields
@@ -36,19 +57,35 @@ def generate_with_image(
         "stream": False,
         # Deterministic: transcription should not vary run to run. num_thread matches the
         # container CPU limit — see Settings.num_thread for why the default oversubscribes.
-        "options": {"temperature": 0, "num_thread": settings.num_thread},
+        # num_predict bounds a runaway; without it ollama generates until the context
+        # fills, and the server's --context-shift means it never does.
+        "options": {
+            "temperature": 0,
+            "num_thread": settings.num_thread,
+            "num_predict": settings.ocr_num_predict,
+        },
     }
     t0 = time.monotonic()
     try:
         resp = httpx.post(
             f"{settings.ollama_host}/api/generate",
             json=payload,
-            timeout=settings.ollama_timeout_seconds,
+            timeout=settings.ocr_timeout_seconds,
         )
         resp.raise_for_status()
+    except httpx.TimeoutException as exc:
+        raise OllamaTimeout(
+            f"vision request against {settings.ollama_host} exceeded "
+            f"{settings.ocr_timeout_seconds:.0f}s: {exc}"
+        ) from exc
     except httpx.HTTPError as exc:
         raise OllamaError(f"vision request failed against {settings.ollama_host}: {exc}") from exc
-    return resp.json().get("response", ""), time.monotonic() - t0
+    data = resp.json()
+    return VisionResult(
+        text=data.get("response", ""),
+        seconds=time.monotonic() - t0,
+        complete=data.get("done_reason", "stop") != "length",
+    )
 
 
 def health(settings: Settings) -> list[str]:

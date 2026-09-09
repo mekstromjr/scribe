@@ -81,6 +81,14 @@ the models it serves, and fails if the expected models are missing.
 - **OCR latency is variable, roughly 20-60s per page.** The same page at the same DPI
   measured 20.6s and 40.3s on different runs — it moves with node contention. Treat it as a
   range, not a constant.
+- **`glm-ocr` can loop forever on a sparse page.** A book's title page (mostly whitespace
+  and a scan gutter) ran to 14,000+ tokens and was still going when the 16k context filled;
+  dense pages from the same scan produced 739-1,475. Ollama's default `num_predict` is
+  unlimited, so scribe caps OCR generation (`SCRIBE_OCR_NUM_PREDICT`, 2x the densest measured
+  page) and gives OCR its own timeout. A page that hits either is recorded as SKIPPED with the
+  reason, and the rest of the document proceeds — both signals are deterministic, so
+  requeueing would only reproduce them. Finished OCR pages are cached in the spool so a
+  genuine requeue resumes instead of redoing them (scribe#4).
 - **Render DPI is the main OCR cost lever.** 200 DPI cost ~50% more wall clock than 150 for
   a byte-identical transcription, so the default is 150.
 - **`glm-ocr` reports zero for every timing field** it returns (`load_duration`,
@@ -189,6 +197,8 @@ All settings are env-overridable with the `SCRIBE_` prefix (see `src/scribe/conf
 | `SCRIBE_NUM_THREAD` | `6` | **Must match the CPU limit in `apps/ollama-mini/deployment.yaml`** |
 | `SCRIBE_OCR_MAX_EDGE` | `1500` | Longest-edge cap for vision input |
 | `SCRIBE_MAX_OCR_PAGES` | `0` (unlimited) | Skipped pages are recorded, not silently dropped |
+| `SCRIBE_OCR_NUM_PREDICT` | `3000` | Generation cap per OCR page; hitting it skips the page (runaway guard) |
+| `SCRIBE_OCR_TIMEOUT_SECONDS` | `900` | Per-page OCR deadline, separate from the summarization timeout; must exceed cap / slowest tok/s |
 | `SCRIBE_GITLAB_TOKEN` | *(none)* | Project access token, `write_repository` on the vault |
 | `SCRIBE_VAULT_PROJECT_ID` | `2` | `mekadmin/mekvault` |
 | `SCRIBE_VAULT_NOTES_DIR` | `+` | The vault's inbox convention |

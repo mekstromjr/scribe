@@ -2,43 +2,33 @@
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
 from PIL import Image
 
 from scribe.config import Settings
-from scribe.document import Document, Method, Page
-from scribe.extract.ocr import ocr_image
-from scribe.extract.pdf import extract_pdf
+from scribe.document import Document
+from scribe.extract.ocr import ocr_page
+from scribe.extract.pdf import PageCache, extract_pdf
 from scribe.extract.web import ExtractionError, extract_url
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
 
-__all__ = ["ExtractionError", "extract", "extract_pdf", "extract_url"]
+__all__ = ["ExtractionError", "PageCache", "extract", "extract_pdf", "extract_url"]
 
 
 def extract_image(settings: Settings, path: Path) -> Document:
-    t0 = time.monotonic()
     with Image.open(path) as img:
-        text, seconds = ocr_image(settings, img)
-    return Document(
-        source=path.name,
-        kind="image",
-        title=path.stem,
-        pages=[
-            Page(
-                number=1,
-                text=text,
-                method=Method.OCR,
-                seconds=seconds or time.monotonic() - t0,
-            )
-        ],
-    )
+        page = ocr_page(settings, img, 1)
+    return Document(source=path.name, kind="image", title=path.stem, pages=[page])
 
 
-def extract(settings: Settings, target: str) -> Document:
-    """Dispatch on the target: URL, PDF, or image."""
+def extract(settings: Settings, target: str, cache: PageCache | None = None) -> Document:
+    """Dispatch on the target: URL, PDF, or image.
+
+    `cache` remembers finished OCR pages across a requeue; only the PDF path uses it, since
+    a single image is one page and a URL never OCRs.
+    """
     if target.startswith(("http://", "https://")):
         return extract_url(settings, target)
 
@@ -48,7 +38,7 @@ def extract(settings: Settings, target: str) -> Document:
 
     suffix = path.suffix.lower()
     if suffix == ".pdf":
-        return extract_pdf(settings, path)
+        return extract_pdf(settings, path, cache=cache)
     if suffix in IMAGE_SUFFIXES:
         return extract_image(settings, path)
     raise ExtractionError(f"unsupported file type '{suffix}' — expected a PDF, image, or URL")

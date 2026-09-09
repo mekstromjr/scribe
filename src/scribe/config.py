@@ -47,6 +47,27 @@ class Settings(BaseSettings):
 
     ollama_timeout_seconds: float = 1800.0
 
+    # --- OCR runaway guard (scribe#4) ---------------------------------------------
+    # glm-ocr loops on sparse pages: a book's title page ran to 14,040 tokens and was
+    # still going when the 16k context filled (2026-09-08). ollama's default num_predict
+    # is unlimited and the server runs with --context-shift, so without a cap the ONLY
+    # stop is the client timeout -- an hour per attempt, three attempts, no note.
+    #
+    # Sized from that document, not guessed: a dense two-page landscape spread produced
+    # 739-1,475 generated tokens per page. 2x the densest observed page gives a legitimate
+    # page headroom and cuts a runaway at ~11 min (slowest observed 4.5 tok/s) instead of
+    # 60. A response that stops here carries done_reason "length" -- the signal that the
+    # model never reached the end of the page -- and the page is SKIPPED, not summarized
+    # from repetition junk. Re-measure if the OCR model or page geometry changes.
+    ocr_num_predict: int = 3000
+    # Per-page ceiling, separate from ollama_timeout_seconds (which is sized for a full
+    # summarization call). Must exceed the time the cap above takes to reach at the
+    # slowest observed rate (3000 / 4.5 tok/s ~ 11 min, plus ~1 min of prompt eval);
+    # otherwise the timeout fires first and the done_reason signal is lost. A timed-out
+    # page is also SKIPPED rather than requeued: the server was up and working, so a
+    # retry would reproduce the same result at temperature 0.
+    ocr_timeout_seconds: float = 900.0
+
     # MEASURED, not guessed. llama.cpp sizes its thread pool from HOST core count and
     # ignores the container's cgroup quota, so on a 10-CPU node with a 6-CPU limit it
     # oversubscribes and the threads fight CFS throttling. Pinning to the limit measured
