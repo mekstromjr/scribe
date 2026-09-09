@@ -22,6 +22,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from scribe.config import Settings
+from scribe.document import Page
 
 
 @dataclass
@@ -75,10 +76,61 @@ def enqueue(settings: Settings, job: Job) -> None:
 
 
 def complete(settings: Settings, job: Job) -> None:
-    """Remove the job and its attachment. Safe to call twice."""
+    """Remove the job, its attachment and its OCR page cache. Safe to call twice."""
     _job_file(settings, job.id).unlink(missing_ok=True)
+    _pages_file(settings, job.id).unlink(missing_ok=True)
     if job.attachment:
         Path(job.attachment).unlink(missing_ok=True)
+
+
+# NOT ".json": restore() globs "*.json" for job records and deletes anything that will not
+# parse as a Job, so a cache file with that suffix would be wiped on every restart.
+_PAGES_SUFFIX = ".pages"
+
+
+def _pages_file(settings: Settings, job_id: str) -> Path:
+    return spool(settings) / f"{job_id}{_PAGES_SUFFIX}"
+
+
+class PageCache:
+    """Finished OCR pages for one job, persisted beside its spool record.
+
+    OCR is the expensive, deterministic part of a job -- minutes per page at temperature 0
+    -- and until scribe#4 a requeue redid all of it, so a document whose last page hung
+    re-OCR'd every good page on every attempt and never got further. With the cache, a
+    retry resumes at the first page it has not finished. SKIPPED pages are cached too: they
+    are exactly the ones a retry must not attempt again.
+
+    Whole-file atomic rewrite per page, same temp-then-rename pattern as enqueue(). Pages
+    are few and small, so rewriting beats a partial-write hazard.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self._pages: dict[int, Page] = {}
+        if path.exists():
+            try:
+                raw = json.loads(path.read_text())
+                self._pages = {int(k): Page.model_validate(v) for k, v in raw.items()}
+            except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+                # A corrupt cache costs a re-OCR, never a failed job.
+                self._pages = {}
+
+    def get(self, number: int) -> Page | None:
+        return self._pages.get(number)
+
+    def put(self, page: Page) -> None:
+        self._pages[page.number] = page
+        tmp = self.path.with_suffix(_PAGES_SUFFIX + ".tmp")
+        tmp.write_text(json.dumps({str(k): v.model_dump() for k, v in self._pages.items()}))
+        os.replace(tmp, self.path)
+
+    def __len__(self) -> int:
+        return len(self._pages)
+
+
+def page_cache(settings: Settings, job_id: str) -> PageCache:
+    return PageCache(_pages_file(settings, job_id))
 
 
 def restore(settings: Settings) -> list[Job]:
