@@ -76,10 +76,13 @@ def _provenance(doc: Document, summary: Summary, model: str) -> str:
     ]
     if doc.ocr_pages:
         parts.append(f"OCR: {doc.ocr_pages} page(s), {doc.seconds:.0f}s")
-    skipped = sum(1 for p in doc.pages if p.method is Method.SKIPPED)
+    skipped = [p for p in doc.pages if p.method is Method.SKIPPED]
     if skipped:
-        # Surfaced in the note itself: a summary built from partial text should say so.
-        parts.append(f"**{skipped} page(s) SKIPPED (OCR cap)**")
+        # Surfaced in the note itself: a summary built from partial text should say so,
+        # and say why -- a runaway OCR page and a page-count cap are different problems.
+        reasons = sorted({p.reason for p in skipped if p.reason})
+        detail = f" ({'; '.join(reasons)})" if reasons else ""
+        parts.append(f"**{len(skipped)} page(s) SKIPPED{detail}**")
     if summary.sections > 1:
         # Say so plainly: a map-reduced summary is genuinely lower resolution than a
         # single pass, because no one pass saw the whole argument.

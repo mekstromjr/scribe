@@ -30,7 +30,7 @@ from scribe.eta import estimate_seconds, eta_line
 from scribe.extract import ExtractionError, extract
 from scribe.note import note_title, obsidian_uri, render, slugify
 from scribe.ollama import OllamaError
-from scribe.queue import Job, complete, enqueue, restore, spool
+from scribe.queue import Job, complete, enqueue, page_cache, restore, spool
 from scribe.runtime_config import effective, set_value
 from scribe.summarize import summarize
 from scribe.tts import TTSError, voices
@@ -251,7 +251,9 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
 
     try:
         abort()
-        doc = extract(settings, job.target)
+        # The page cache lives in the spool under the job id, so a requeued attempt
+        # resumes OCR at the first unfinished page instead of redoing them all (scribe#4).
+        doc = extract(settings, job.target, cache=page_cache(settings, job.id))
         if job.attachment_name:
             # The extractors derive title/source from the file PATH, which for an upload is
             # the SPOOLED name carrying a job-id prefix (kept so concurrent uploads cannot

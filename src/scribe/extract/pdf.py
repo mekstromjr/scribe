@@ -15,12 +15,13 @@ pypdfium2 so there is no system dependency on Poppler.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Protocol
 
 import pypdfium2 as pdfium
 
 from scribe.config import Settings
 from scribe.document import Document, Method, Page
-from scribe.extract.ocr import ocr_image
+from scribe.extract.ocr import ocr_page
 
 
 def _page_text(page: pdfium.PdfPage) -> str:
@@ -32,7 +33,14 @@ def _page_text(page: pdfium.PdfPage) -> str:
         textpage.close()
 
 
-def extract_pdf(settings: Settings, path: Path) -> Document:
+class PageCache(Protocol):
+    """Where finished OCR pages are remembered across a requeue. See scribe.queue."""
+
+    def get(self, number: int) -> Page | None: ...
+    def put(self, page: Page) -> None: ...
+
+
+def extract_pdf(settings: Settings, path: Path, cache: PageCache | None = None) -> Document:
     doc = Document(source=path.name, kind="pdf", title=path.stem)
     pdf = pdfium.PdfDocument(str(path))
     ocr_used = 0
@@ -50,16 +58,24 @@ def extract_pdf(settings: Settings, path: Path) -> Document:
                 # Record the gap rather than silently truncating — a note that quietly
                 # omits half a document is worse than one that says it did.
                 doc.pages.append(
-                    Page(number=index, text="", method=Method.SKIPPED)
+                    Page(number=index, text="", method=Method.SKIPPED, reason="OCR page cap")
                 )
                 continue
 
+            # Only OCR'd pages are cached: the text layer is free to re-read, OCR is
+            # minutes per page and deterministic, so a requeued job must not pay for
+            # pages it already finished (scribe#4).
+            if cache is not None and (cached := cache.get(index)) is not None:
+                doc.pages.append(cached)
+                ocr_used += 1
+                continue
+
             bitmap = page.render(scale=settings.ocr_render_dpi / 72)
-            ocr_text, seconds = ocr_image(settings, bitmap.to_pil())
+            result = ocr_page(settings, bitmap.to_pil(), index)
             ocr_used += 1
-            doc.pages.append(
-                Page(number=index, text=ocr_text, method=Method.OCR, seconds=seconds)
-            )
+            doc.pages.append(result)
+            if cache is not None:
+                cache.put(result)
     finally:
         pdf.close()
     return doc
