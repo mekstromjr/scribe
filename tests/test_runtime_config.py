@@ -71,3 +71,48 @@ class TestSafety:
 
     def test_allowlist_is_exactly_the_three_toggles(self):
         assert sorted(ALLOWED_KEYS) == ["note_format", "tts_enabled", "tts_voice"]
+
+
+class TestPerUser:
+    """scribe#6: two people on one bot each get their own settings automatically."""
+
+    def test_user_layer_beats_shared_beats_env(self, settings):
+        set_value(settings, "tts_voice", "af_bella")            # shared
+        set_value(settings, "tts_voice", "bm_george", user="U1")
+        assert effective(settings, "U1").tts_voice == "bm_george"
+        assert effective(settings, "U2").tts_voice == "af_bella"
+        assert effective(settings).tts_voice == "af_bella"
+
+    def test_user_without_overrides_follows_shared(self, settings):
+        set_value(settings, "note_format", "md")
+        assert effective(settings, "U9").note_format == "md"
+
+    def test_users_do_not_see_each_other(self, settings):
+        set_value(settings, "tts_voice", "bm_george", user="U1")
+        set_value(settings, "note_format", "docx", user="U2")
+        assert effective(settings, "U1").note_format == "pdf"
+        assert effective(settings, "U2").tts_voice == "am_michael"
+
+    def test_legacy_flat_file_is_the_shared_layer(self, settings):
+        config_path(settings).parent.mkdir(parents=True, exist_ok=True)
+        config_path(settings).write_text(json.dumps({"tts_voice": "af_sky"}))
+        assert effective(settings, "U1").tts_voice == "af_sky"
+        # And a write keeps the legacy key while adding the users map.
+        set_value(settings, "tts_enabled", False, user="U1")
+        on_disk = json.loads(config_path(settings).read_text())
+        assert on_disk == {"tts_voice": "af_sky", "users": {"U1": {"tts_enabled": False}}}
+
+    def test_unknown_keys_in_a_user_entry_are_dropped(self, settings):
+        config_path(settings).parent.mkdir(parents=True, exist_ok=True)
+        config_path(settings).write_text(
+            json.dumps({"users": {"U1": {"evil": 1, "tts_voice": "x"}}})
+        )
+        assert load(settings, "U1") == {"tts_voice": "x"}
+
+    def test_users_key_is_never_a_setting(self, settings):
+        with pytest.raises(ValueError):
+            set_value(settings, "users", {})
+
+    def test_unknown_user_key_is_refused(self, settings):
+        with pytest.raises(ValueError):
+            set_value(settings, "abs_token", "x", user="U1")

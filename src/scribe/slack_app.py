@@ -33,7 +33,7 @@ from scribe.note import note_title, render, slugify
 from scribe.note_export import FORMATS, ExportError, export_note
 from scribe.ollama import OllamaError
 from scribe.queue import Job, complete, enqueue, page_cache, restore, spool
-from scribe.runtime_config import effective, set_value
+from scribe.runtime_config import effective, load, set_value
 from scribe.summarize import summarize
 from scribe.tts import TTSError, voices
 
@@ -182,8 +182,10 @@ def _audio_stage(settings: Settings, client, job: Job, doc, summary) -> None:
 
     Never raises. Each delivery step degrades independently: an ABS outage still posts
     the file to Slack, and a Slack upload failure still leaves the ABS link.
+
+    `settings` is the job's already-resolved view (shared + sender overrides); it is not
+    re-resolved here, which would silently drop the sender's layer.
     """
-    settings = effective(settings)
     title = note_title(doc, summary)
     author = doc.source if doc.kind == "link" else "scribe"
     try:
@@ -269,8 +271,9 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
     """Run the pipeline and reply in-thread. Never raises — failures are reported to Slack."""
     # Runtime overrides are read ONCE, here, at the start of the job: a toggle typed
     # while this document is mid-flight applies to the next one, so a job's behavior
-    # never changes underneath the ack the user already received.
-    settings = effective(settings)
+    # never changes underneath the ack the user already received. Resolved for the
+    # SENDER (scribe#6): each person gets their own voice and format automatically.
+    settings = effective(settings, job.user)
     requeued = False
 
     def abort() -> None:
@@ -435,11 +438,13 @@ def _submit(settings: Settings, pool: ThreadPoolExecutor, pending: _Pending,
 
 
 def _register_config_commands(app: App, settings: Settings) -> None:
-    """Slash commands for on-the-fly configuration (scribe#2).
+    """Slash commands for on-the-fly configuration (scribe#2, per-user in scribe#6).
 
-    Changes take effect for jobs started after the command; anything already running
-    finishes under the settings it began with, so a mid-queue toggle cannot produce a
-    half-configured document.
+    Every command writes the INVOKING user's own layer, so two people never fight over
+    a voice. A trailing `default` word writes the shared layer everyone falls back to
+    instead. Changes take effect for jobs started after the command; anything already
+    running finishes under the settings it began with, so a mid-queue toggle cannot
+    produce a half-configured document.
     """
 
     def _state_line(s: Settings) -> str:
@@ -448,11 +453,23 @@ def _register_config_commands(app: App, settings: Settings) -> None:
             f"TTS *{'on' if s.tts_enabled else 'off'}*"
         )
 
+    def _scope(command) -> tuple[str, str | None, str]:
+        """(argument text, target user or None for the shared layer, scope label)."""
+        words = (command.get("text") or "").split()
+        if words and words[-1].lower() == "default":
+            return " ".join(words[:-1]), None, "for everyone by default"
+        return " ".join(words), command.get("user_id") or None, "for you"
+
+    def _both_off_note(after: Settings) -> str:
+        if after.note_format == "none" and not after.tts_enabled:
+            return "\n_Both outputs are off — documents will only get a TL;DR in thread._"
+        return ""
+
     @app.command("/scribevoice")
     def on_voice(ack, respond, command):
         ack()
-        current = effective(settings)
-        wanted = (command.get("text") or "").strip()
+        wanted, user, scope = _scope(command)
+        current = effective(settings, user)
         try:
             available = voices(current)
         except TTSError as exc:
@@ -463,22 +480,31 @@ def _register_config_commands(app: App, settings: Settings) -> None:
                 f"• `{v}`{'  ← current' if v == current.tts_voice else ''}"
                 for v in available
             )
-            respond(f"Current voice: *{current.tts_voice}*\n\n{listing}")
+            respond(f"Your voice: *{current.tts_voice}*\n\n{listing}")
             return
         if wanted not in available:
             near = [v for v in available if wanted.lower() in v.lower()]
             hint = f" Did you mean {', '.join(f'`{v}`' for v in near[:3])}?" if near else ""
             respond(f"`{wanted}` is not a voice this server serves.{hint}")
             return
-        set_value(settings, "tts_voice", wanted)
+        set_value(settings, "tts_voice", wanted, user=user)
+        # Kokoro keeps every voice tensor it has ever served resident (k8s#145/#146), so
+        # each distinct voice in regular use costs memory for the life of the server.
+        # Worth saying once at the moment someone diverges from the shared default.
+        memo = ""
+        if user is not None and wanted != effective(settings).tts_voice:
+            memo = ("\n_Heads up: each distinct voice in use stays loaded in the TTS "
+                    "server's memory; two or three is fine, a different voice per person "
+                    "is not free._")
         respond(
-            f"Voice set to *{wanted}* for the next document. "
-            f"{_state_line(effective(settings))}"
+            f"Voice set to *{wanted}* {scope} from the next document. "
+            f"{_state_line(effective(settings, user))}{memo}"
         )
 
     def _toggle(key: str, label: str, respond, command) -> None:
-        current = effective(settings)
-        arg = (command.get("text") or "").strip().lower()
+        arg, user, scope = _scope(command)
+        current = effective(settings, user)
+        arg = arg.strip().lower()
         # An explicit on/off is idempotent; bare invocation flips. Both are useful —
         # flipping is fastest from a phone, explicit is safe in a script.
         if arg in {"on", "off"}:
@@ -488,33 +514,30 @@ def _register_config_commands(app: App, settings: Settings) -> None:
             return
         else:
             new = not getattr(current, key)
-        set_value(settings, key, new)
-        after = effective(settings)
-        note = ""
-        if after.note_format == "none" and not after.tts_enabled:
-            note = "\n_Both outputs are off — documents will only get a TL;DR in thread._"
-        respond(f"{label} is now *{'on' if new else 'off'}*. {_state_line(after)}{note}")
+        set_value(settings, key, new, user=user)
+        after = effective(settings, user)
+        respond(f"{label} is now *{'on' if new else 'off'}* {scope}. "
+                f"{_state_line(after)}{_both_off_note(after)}")
 
     @app.command("/scribeformat")
     def on_format(ack, respond, command):
         """Pick the file format the full note is delivered in, or `none` for TL;DR only."""
         ack()
-        current = effective(settings)
-        wanted = (command.get("text") or "").strip().lower()
+        wanted, user, scope = _scope(command)
+        wanted = wanted.strip().lower()
+        current = effective(settings, user)
         choices = ", ".join(f"`{f}`" for f in FORMATS)
         if not wanted:
-            respond(f"Notes are delivered as *{current.note_format}*. Options: {choices}.")
+            respond(f"Your notes are delivered as *{current.note_format}*. Options: {choices}. "
+                    f"Add `default` to change the shared default instead.")
             return
         if wanted not in FORMATS:
             respond(f"`{wanted}` is not a note format. Options: {choices}.")
             return
-        set_value(settings, "note_format", wanted)
-        after = effective(settings)
-        note = ""
-        if after.note_format == "none" and not after.tts_enabled:
-            note = "\n_Both outputs are off — documents will only get a TL;DR in thread._"
-        respond(f"Notes will be delivered as *{wanted}* from the next document. "
-                f"{_state_line(after)}{note}")
+        set_value(settings, "note_format", wanted, user=user)
+        after = effective(settings, user)
+        respond(f"Notes will be delivered as *{wanted}* {scope} from the next document. "
+                f"{_state_line(after)}{_both_off_note(after)}")
 
     @app.command("/scribetoggletts")
     def on_toggle_tts(ack, respond, command):
@@ -522,9 +545,22 @@ def _register_config_commands(app: App, settings: Settings) -> None:
         _toggle("tts_enabled", "TTS audio", respond, command)
 
     @app.command("/scribeconfig")
-    def on_config(ack, respond, command):  # noqa: ARG001
+    def on_config(ack, respond, command):
         ack()
-        respond(f"scribe: {_state_line(effective(settings))}")
+        user = command.get("user_id") or None
+        mine = effective(settings, user)
+        shared = effective(settings)
+        own = load(settings, user) if user else {}
+        lines = [f"Your settings: {_state_line(mine)}"]
+        if own:
+            lines.append(f"Shared defaults: {_state_line(shared)}")
+            lines.append("_You have overridden: " + ", ".join(sorted(own)) +
+                         ". Commands change your own settings; add `default` to change "
+                         "the shared ones._")
+        else:
+            lines.append("_You are on the shared defaults. Any command you run changes "
+                         "only your settings; add `default` to change everyone's._")
+        respond("\n".join(lines))
 
 
 def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
