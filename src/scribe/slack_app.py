@@ -27,14 +27,26 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from scribe.abs import ABSError, upload
 from scribe.audio import produce_audio
 from scribe.config import Settings, load_settings
+from scribe.document import Document
 from scribe.eta import estimate_seconds, eta_line
 from scribe.extract import ExtractionError, extract
 from scribe.note import note_title, render, slugify
 from scribe.note_export import FORMATS, ExportError, export_note
 from scribe.ollama import OllamaError
-from scribe.queue import Job, complete, enqueue, page_cache, restore, spool
+from scribe.queue import (
+    AudioJob,
+    Job,
+    complete,
+    complete_audio,
+    enqueue,
+    enqueue_audio,
+    page_cache,
+    restore,
+    restore_audio,
+    spool,
+)
 from scribe.runtime_config import effective, load, set_value
-from scribe.summarize import summarize
+from scribe.summarize import Summary, summarize
 from scribe.tts import TTSError, voices
 
 log = logging.getLogger("scribe.slack")
@@ -78,17 +90,17 @@ class _Active:
     """
 
     def __init__(self) -> None:
-        self._by_thread: dict[str, dict[str, Job]] = {}
+        self._by_thread: dict[str, dict[str, Job | AudioJob]] = {}
         self._counts: dict[str, int] = {}
         self._canceled: set[str] = set()
         self._lock = threading.Lock()
 
-    def add(self, job: Job) -> None:
+    def add(self, job: Job | AudioJob) -> None:
         with self._lock:
             self._by_thread.setdefault(job.thread_ts, {})[job.id] = job
             self._counts[job.id] = self._counts.get(job.id, 0) + 1
 
-    def remove(self, job: Job) -> None:
+    def remove(self, job: Job | AudioJob) -> None:
         with self._lock:
             n = self._counts.get(job.id, 0) - 1
             if n > 0:
@@ -102,7 +114,7 @@ class _Active:
                 if not thread:
                     del self._by_thread[job.thread_ts]
 
-    def cancel_thread(self, thread_ts: str) -> list[Job]:
+    def cancel_thread(self, thread_ts: str) -> list[Job | AudioJob]:
         """Mark every job in the thread canceled; returns them (may be empty)."""
         with self._lock:
             jobs = list(self._by_thread.get(thread_ts, {}).values())
@@ -177,7 +189,8 @@ def download_file(settings: Settings, file_info: dict, dest: Path) -> Path:
     return dest
 
 
-def _audio_stage(settings: Settings, client, job: Job, doc, summary) -> None:
+def _audio_stage(settings: Settings, client, job, doc, summary,
+                 abort=lambda: None) -> None:
     """Synthesize, upload to Audiobookshelf, and post the m4b in-thread.
 
     Never raises. Each delivery step degrades independently: an ABS outage still posts
@@ -189,7 +202,9 @@ def _audio_stage(settings: Settings, client, job: Job, doc, summary) -> None:
     title = note_title(doc, summary)
     author = doc.source if doc.kind == "link" else "scribe"
     try:
-        result = produce_audio(settings, doc, summary, title=title, author=author)
+        result = produce_audio(settings, doc, summary, title=title, author=author, abort=abort)
+    except JobCanceled:
+        raise
     except Exception as exc:
         log.warning("audio synthesis failed for %s: %s", job.source_label, exc)
         client.chat_postMessage(
@@ -267,8 +282,14 @@ def _note_stage(settings: Settings, client, job: Job, doc, summary) -> None:
 
 
 def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
-             active: _Active | None = None) -> None:
-    """Run the pipeline and reply in-thread. Never raises — failures are reported to Slack."""
+             active: _Active | None = None, audio_submit=lambda _aj: None) -> None:
+    """Run the summarize half of the pipeline and reply in-thread. Never raises —
+    failures are reported to Slack.
+
+    Ends by HANDING OFF the audio half (scribe#7): the AudioJob is spooled, then
+    ``audio_submit`` schedules it on the audio worker. This worker is free for the next
+    document the moment the note is posted, while Kokoro grinds through the last one.
+    """
     # Runtime overrides are read ONCE, here, at the start of the job: a toggle typed
     # while this document is mid-flight applies to the next one, so a job's behavior
     # never changes underneath the ack the user already received. Resolved for the
@@ -327,15 +348,23 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
         # The full note follows the TL;DR as a file. Best-effort: the summary is the
         # product and is already in the thread.
         _note_stage(settings, client, job, doc, summary)
-        # Audio AFTER the note reply, and best-effort: at Kokoro's measured 1.6x
-        # realtime a long article synthesizes for tens of minutes, and a TTS failure
-        # must never fail (or requeue) a job whose note already published.
+        # Audio is a separate, spooled job on its own worker. Spooled BEFORE this record
+        # completes, so a crash between the two cannot lose the promised audio.
         if settings.tts_enabled and settings.abs_token:
             if active and active.canceled(job.id):
                 # Canceled after the note posted: keep the note, skip only the audio.
                 log.info("skipping audio for canceled job %s", job.id)
             else:
-                _audio_stage(settings, client, job, doc, summary)
+                audio_job = AudioJob(
+                    id=job.id, channel=job.channel, thread_ts=job.thread_ts,
+                    source_label=job.source_label, user=job.user,
+                    doc=doc.model_dump(mode="json"), summary=summary.model_dump(mode="json"),
+                    # The sender's resolved TTS settings, frozen at hand-off.
+                    overrides={"tts_voice": settings.tts_voice,
+                               "tts_enabled": settings.tts_enabled},
+                )
+                enqueue_audio(settings, audio_job)
+                audio_submit(audio_job)
     except JobCanceled:
         log.info("job %s canceled by its thread", job.id)
     except ExtractionError as exc:
@@ -389,6 +418,30 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
             complete(settings, job)
 
 
+def _process_audio(settings: Settings, client, job: AudioJob,
+                   active: _Active | None = None) -> None:
+    """Run the audio half from its spool record. Never raises, never requeues: the note
+    is already delivered, so anything that goes wrong here costs the m4b, not the job."""
+    # NOT effective(): the settings the sender had at hand-off are frozen in the record.
+    settings = settings.model_copy(update=job.overrides)
+
+    def abort() -> None:
+        if active and active.canceled(job.id):
+            raise JobCanceled()
+
+    try:
+        abort()
+        doc = Document.model_validate(job.doc)
+        summary = Summary.model_validate(job.summary)
+        _audio_stage(settings, client, job, doc, summary, abort=abort)
+    except JobCanceled:
+        log.info("audio for %s canceled by its thread", job.id)
+    except Exception:
+        log.exception("unexpected failure in audio for %s", job.source_label)
+    finally:
+        complete_audio(settings, job)
+
+
 class _Pending:
     """Counts queued jobs — and their estimated seconds — so the ack can quote when THIS
     document will be done, not when it will merely start.
@@ -420,21 +473,48 @@ class _Pending:
 
 
 def _submit(settings: Settings, pool: ThreadPoolExecutor, pending: _Pending,
-            active: _Active, client, job: Job, est_seconds: float) -> None:
+            active: _Active, client, job: Job, est_seconds: float,
+            audio_submit=lambda _aj: None) -> None:
     def requeue(j: Job) -> None:
         # Back of the queue, not the front: a document whose dependency is down should not
         # block everything behind it while it retries.
         pending.add(est_seconds)
-        _submit(settings, pool, pending, active, client, j, est_seconds)
+        _submit(settings, pool, pending, active, client, j, est_seconds, audio_submit)
 
     active.add(job)
-    fut = pool.submit(_process, settings, client, job, requeue, active)
+    fut = pool.submit(_process, settings, client, job, requeue, active, audio_submit)
 
     def _done(_f) -> None:
         pending.done(est_seconds)
         active.remove(job)
 
     fut.add_done_callback(_done)
+
+
+def _submit_audio(settings: Settings, pool: ThreadPoolExecutor, pending: _Pending,
+                  active: _Active, client, job: AudioJob) -> None:
+    """Schedule an audio job on the audio worker. Registered under the same id as its
+    summarize half, so a thread cancel finds it whether it is waiting or synthesizing."""
+    # Queue-wait accounting per stage; the audio ETA itself is scribe#8's job.
+    est = _audio_estimate_seconds(job)
+    pending.add(est)
+    active.add(job)
+    fut = pool.submit(_process_audio, settings, client, job, active)
+
+    def _done(_f) -> None:
+        pending.done(est)
+        active.remove(job)
+
+    fut.add_done_callback(_done)
+
+
+def _audio_estimate_seconds(job: AudioJob) -> float:
+    """Rough audio-stage cost for queue-wait accounting: measured 2026-09-14 at ~100 s
+    per 3000-char segment on production Kokoro. Refit belongs to scribe#8."""
+    chars = len(job.summary.get("summary", "")) + sum(
+        len(p.get("text", "")) for p in job.doc.get("pages", [])
+    )
+    return chars / 30.0
 
 
 def _register_config_commands(app: App, settings: Settings) -> None:
@@ -570,12 +650,19 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
     # BOTH app_mention and message.channels for the same message, and handling both
     # would summarize the document twice.
     bot_user_id = app.client.auth_test().get("user_id", "")
-    # One worker: the model server is the bottleneck and handles one request at a time.
+    # One summarize worker: Ollama is the bottleneck and handles one request at a time.
     # Parallel documents would not finish sooner, only thrash a shared bottleneck.
+    # One audio worker: Kokoro is a DIFFERENT server, so the two stages overlap — the
+    # next document summarizes while the last one synthesizes (scribe#7).
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="scribe")
+    audio_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="scribe-audio")
     pending = _Pending()
+    audio_pending = _Pending()
     active = _Active()
     user_tz = _UserTz()
+
+    def audio_submit(aj: AudioJob) -> None:
+        _submit_audio(settings, audio_pool, audio_pending, active, app.client, aj)
 
     def handle(event: dict, say, client) -> None:
         # Ignore our own messages, or we would answer ourselves forever.
@@ -603,7 +690,10 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
         if event.get("thread_ts") and not event.get("files") and is_cancel(event.get("text", "")):
             jobs = active.cancel_thread(event["thread_ts"])
             for j in jobs:
-                complete(settings, j)
+                if isinstance(j, AudioJob):
+                    complete_audio(settings, j)
+                else:
+                    complete(settings, j)
             if jobs:
                 labels = ", ".join(j.source_label for j in jobs)
                 say(
@@ -667,7 +757,7 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
                  f"{queued}",
             thread_ts=thread_ts,
         )
-        _submit(settings, pool, pending, active, client, job, est)
+        _submit(settings, pool, pending, active, client, job, est, audio_submit)
 
     @app.event("app_mention")
     def on_mention(event, say, client):
@@ -692,9 +782,13 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
                 return
             handle(event, say, client)
 
-    # Resume anything the previous run did not finish, in the order it arrived. Each
-    # thread is told explicitly — a silently resumed job is indistinguishable from a
-    # stalled one, which is the confusion the spool exists to prevent.
+    # Resume anything the previous run did not finish, in the order it arrived. Audio
+    # first: those documents are furthest along and their threads already have a note,
+    # so they resume silently. Summarize jobs are told explicitly — a silently resumed
+    # job is indistinguishable from a stalled one, which the spool exists to prevent.
+    for audio_job in restore_audio(settings):
+        log.info("resuming audio job %s (%s)", audio_job.id, audio_job.source_label)
+        audio_submit(audio_job)
     for job in restore(settings):
         log.info("resuming queued job %s (%s)", job.id, job.source_label)
         est = estimate_seconds(settings, job.target)
@@ -709,7 +803,7 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
             )
         except Exception:
             log.exception("could not notify resume for %s", job.id)
-        _submit(settings, pool, pending, active, app.client, job, est)
+        _submit(settings, pool, pending, active, app.client, job, est, audio_submit)
 
     return app, pool
 
