@@ -18,8 +18,9 @@ import json
 import os
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 from scribe.config import Settings
 from scribe.document import Page
@@ -56,6 +57,30 @@ class Job:
                    source_label=source_label)
 
 
+@dataclass
+class AudioJob:
+    """The audio half of a job, handed from the summarize worker to the audio worker via
+    the spool (scribe#7).
+
+    Carries everything the audio stage needs so it never touches Ollama, the source file
+    or the runtime config: the extracted Document and the Summary as plain dicts, and
+    the SENDER's resolved TTS settings frozen at hand-off time. Frozen on purpose: the
+    ack already promised audio under those settings, and a voice change typed while the
+    job waits in this queue applies to the next document, not this one.
+
+    Same id as the summarize job, so the two halves share one cancel entry and sort
+    together in arrival order.
+    """
+    id: str
+    channel: str
+    thread_ts: str
+    source_label: str
+    user: str | None
+    doc: dict[str, Any]
+    summary: dict[str, Any]
+    overrides: dict[str, Any] = field(default_factory=dict)
+
+
 def spool(settings: Settings) -> Path:
     d = Path(settings.spool_dir).expanduser()
     d.mkdir(parents=True, exist_ok=True)
@@ -86,6 +111,36 @@ def complete(settings: Settings, job: Job) -> None:
 # NOT ".json": restore() globs "*.json" for job records and deletes anything that will not
 # parse as a Job, so a cache file with that suffix would be wiped on every restart.
 _PAGES_SUFFIX = ".pages"
+# Same reason. Audio records have their own suffix and their own restore().
+_AUDIO_SUFFIX = ".audio"
+
+
+def _audio_file(settings: Settings, job_id: str) -> Path:
+    return spool(settings) / f"{job_id}{_AUDIO_SUFFIX}"
+
+
+def enqueue_audio(settings: Settings, job: AudioJob) -> None:
+    """Persist an audio job. Temp-then-rename like enqueue(); a document's text is a few
+    hundred KB at most and the record dies with the job."""
+    path = _audio_file(settings, job.id)
+    tmp = path.with_suffix(_AUDIO_SUFFIX + ".tmp")
+    tmp.write_text(json.dumps(asdict(job)))
+    os.replace(tmp, path)
+
+
+def complete_audio(settings: Settings, job: AudioJob) -> None:
+    _audio_file(settings, job.id).unlink(missing_ok=True)
+
+
+def restore_audio(settings: Settings) -> list[AudioJob]:
+    """Unfinished audio jobs in arrival order; a corrupt record is dropped, not fatal."""
+    jobs: list[AudioJob] = []
+    for path in sorted(spool(settings).glob(f"*{_AUDIO_SUFFIX}")):
+        try:
+            jobs.append(AudioJob(**json.loads(path.read_text())))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            path.unlink(missing_ok=True)
+    return jobs
 
 
 def _pages_file(settings: Settings, job_id: str) -> Path:

@@ -1,0 +1,8 @@
+[
+  {"id": "textbook-section", "kind": "pdf", "url": "https://jeffe.cs.illinois.edu/teaching/algorithms/book/03-dynprog.pdf", "note": "opening section of a textbook chapter; text layer, numbered headings, footnotes"},
+  {"id": "paper-intro", "kind": "pdf", "url": "https://arxiv.org/pdf/1706.03762", "note": "paper abstract + introduction; two-column, citations, equations"},
+  {"id": "press-release-tables", "kind": "pdf", "url": "https://www.federalreserve.gov/monetarypolicy/files/monetary20250618a1.pdf", "note": "short official release with tables"},
+  {"id": "encyclopedia", "kind": "link", "url": "https://en.wikipedia.org/wiki/Dynamic_programming", "note": "wiki article; citation markers, math"},
+  {"id": "news-article", "kind": "link", "url": "https://www.theguardian.com/world/2026/sep/16/us-visa-restrictions-south-africans-trump-claims-anti-white-discrimination", "note": "news article; captions, related-links chrome"},
+  {"id": "book-chapter", "kind": "link", "url": "https://www.gutenberg.org/cache/epub/1661/pg1661-images.html", "note": "public-domain fiction; long dialogue paragraphs"}
+]
