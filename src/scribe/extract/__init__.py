@@ -20,7 +20,8 @@ __all__ = ["ExtractionError", "PageCache", "extract", "extract_pdf", "extract_ur
 def extract_image(settings: Settings, path: Path) -> Document:
     with Image.open(path) as img:
         page = ocr_page(settings, img, 1)
-    return Document(source=path.name, kind="image", title=path.stem, pages=[page])
+    # No title: an image's stem is "IMG_4821" at best. The model names it (scribe#9).
+    return Document(source=path.name, kind="image", title=None, pages=[page])
 
 
 def extract(settings: Settings, target: str, cache: PageCache | None = None) -> Document:
