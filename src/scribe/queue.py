@@ -79,6 +79,10 @@ class AudioJob:
     doc: dict[str, Any]
     summary: dict[str, Any]
     overrides: dict[str, Any] = field(default_factory=dict)
+    # Listening-script length and the RAW (uncalibrated) audio prediction from it, so
+    # the audio worker can learn from actual-vs-predicted (scribe#8).
+    script_chars: int = 0
+    predicted_raw: float = 0.0
 
 
 def spool(settings: Settings) -> Path:
