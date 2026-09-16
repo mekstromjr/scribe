@@ -101,6 +101,18 @@ def _cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_calibration(args: argparse.Namespace) -> int:  # noqa: ARG001
+    """Learned per-stage ETA factors (scribe#8), from the runtime config beside the spool."""
+    import json
+
+    from scribe.calibration import Calibration
+
+    cal = Calibration.load(load_settings())
+    print(cal.describe())
+    print(json.dumps({k: vars(v) for k, v in cal.stats.items()}, indent=2))
+    return 0
+
+
 def _cmd_listen(args: argparse.Namespace) -> int:
     """Extract -> summarize -> synthesize -> package an .m4b; optionally upload to ABS.
 
@@ -275,6 +287,9 @@ def main() -> int:
     p_probe = sub.add_parser("probe", help="check whether a PDF has a text layer (no OCR)")
     p_probe.add_argument("target")
     p_probe.set_defaults(func=_cmd_probe)
+
+    p_cal = sub.add_parser("calibration", help="show the learned ETA correction factors")
+    p_cal.set_defaults(func=_cmd_calibration)
 
     p_health = sub.add_parser("health", help="show which Ollama host and models are in use")
     p_health.set_defaults(func=_cmd_health)
