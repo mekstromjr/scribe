@@ -124,7 +124,6 @@ class TestSpooledNameDoesNotLeak:
     '1787110665559937147-a2779432-Syllabus' is unfindable."""
 
     def test_document_title_uses_the_original_upload_name(self):
-        from pathlib import Path
 
         from scribe.document import Document
         from scribe.note import note_title
@@ -133,15 +132,17 @@ class TestSpooledNameDoesNotLeak:
         doc = Document(
             source="1787110665559937147-a2779432-Syllabus-F26-v0-1.pdf",
             kind="pdf",
-            title="1787110665559937147-a2779432-Syllabus-F26-v0-1",
+            title=None,  # no PDF metadata title
         )
         # What _process now does when the job carries an original name.
         original = "Syllabus-F26-v0-1.pdf"
         doc.source = original
-        doc.title = Path(original).stem
 
+        # With a model title, that wins (scribe#9); the spooled prefix is nowhere.
         s = Summary(title="Model Written Title", tldr="", summary="")
-        assert note_title(doc, s) == "Syllabus-F26-v0-1"
+        assert note_title(doc, s) == "Model Written Title"
+        # Without one, the fallback is the ORIGINAL stem, never the spooled name.
+        assert note_title(doc, Summary(title="", tldr="", summary="")) == "Syllabus-F26-v0-1"
         assert doc.source == "Syllabus-F26-v0-1.pdf"
 
 

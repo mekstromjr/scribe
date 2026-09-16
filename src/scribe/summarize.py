@@ -25,7 +25,9 @@ PROMPT = """\
 You are summarizing a document for a personal knowledge vault.
 
 Return JSON with exactly these fields:
-- "title": a short, specific title for the document. No trailing punctuation.
+- "title": a short, specific title for the document. No trailing punctuation. If the \
+document is a chapter, section or excerpt of a larger work and the work is identifiable \
+from the text, name both, e.g. "Algorithms, Chapter 3: Dynamic Programming".
 - "tldr": 2-3 sentences capturing what this document is and why it matters. This is the \
 only part the reader sees in chat, so it must stand alone.
 - "summary": a THOROUGH summary in markdown. Use `##` headings and bullets. Cover every \
@@ -80,7 +82,9 @@ Below are key points extracted from a long document, in order, section by sectio
 the summary of the WHOLE document from them.
 
 Return JSON with exactly these fields:
-- "title": a short, specific title. No trailing punctuation.
+- "title": a short, specific title. No trailing punctuation. If the document is a \
+chapter or section of a larger, identifiable work, name both, e.g. "Algorithms, Chapter 3: \
+Dynamic Programming".
 - "tldr": 2-3 sentences on what this document is and why it matters. This is the only \
 part the reader sees in chat, so it must stand alone.
 - "summary": a THOROUGH summary in markdown, using `##` headings and bullets. Cover the \

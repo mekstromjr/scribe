@@ -134,6 +134,15 @@ One cost to know about: Kokoro keeps every voice tensor it has served resident, 
 distinct voice in regular use is memory for the life of the TTS server. Two or three is
 fine; the bot says so once when someone picks a voice other than the shared default.
 
+## Titles are a ladder, and the filename is the bottom rung
+
+A file's name is rarely its title (`03-dynprog.pdf` is a chapter on dynamic programming),
+so the note, the Slack file and the Audiobookshelf entry are named by the first rung that
+holds: the PDF's own metadata Title when it is real; then the model's title, which the
+prompt asks to name the larger work and chapter when the text makes that identifiable;
+then the filename stem. "Real" excludes filenames in disguise: slugs, office-suite export
+prefixes, placeholders like "untitled". A link keeps the page's own title, as before.
+
 ## Two workers, two stages
 
 Summarizing is Ollama-bound and Ollama serves one request at a time, so there is one

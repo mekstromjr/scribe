@@ -309,12 +309,12 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
         # resumes OCR at the first unfinished page instead of redoing them all (scribe#4).
         doc = extract(settings, job.target, cache=page_cache(settings, job.id))
         if job.attachment_name:
-            # The extractors derive title/source from the file PATH, which for an upload is
+            # The extractors derive `source` from the file PATH, which for an upload is
             # the SPOOLED name carrying a job-id prefix (kept so concurrent uploads cannot
-            # collide on disk). Left alone that prefix becomes the note's title, its H1 and
-            # its Sources frontmatter -- e.g. "1787110665559937147-a2779432-Syllabus".
+            # collide on disk). Left alone that prefix reaches the Sources frontmatter and,
+            # via the filename fallback, the title. `title` is NOT set from the name: the
+            # ladder in note_title prefers PDF metadata, then the model (scribe#9).
             doc.source = job.attachment_name
-            doc.title = Path(job.attachment_name).stem
         summary = summarize(settings, doc, abort=abort)
 
         # Past here the TL;DR is posted and cancel would confuse more than it saves.

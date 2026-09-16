@@ -22,6 +22,7 @@ import pypdfium2 as pdfium
 from scribe.config import Settings
 from scribe.document import Document, Method, Page
 from scribe.extract.ocr import ocr_page
+from scribe.note import is_junk_title
 
 
 def _page_text(page: pdfium.PdfPage) -> str:
@@ -40,9 +41,21 @@ class PageCache(Protocol):
     def put(self, page: Page) -> None: ...
 
 
+def _metadata_title(pdf: pdfium.PdfDocument) -> str | None:
+    """The PDF's own Title, or None when absent or a filename in disguise (scribe#9).
+    LaTeX/hyperref PDFs usually ship an empty Title; Word stamps its export path."""
+    try:
+        title = (pdf.get_metadata_value("Title") or "").strip()
+    except Exception:  # pdfium raises on some malformed info dicts; not worth a failure
+        return None
+    return None if is_junk_title(title) else title
+
+
 def extract_pdf(settings: Settings, path: Path, cache: PageCache | None = None) -> Document:
-    doc = Document(source=path.name, kind="pdf", title=path.stem)
     pdf = pdfium.PdfDocument(str(path))
+    # Title from metadata when it is real, otherwise None so note_title falls through to
+    # the model's title rather than the filename stem ("03-dynprog" is not a title).
+    doc = Document(source=path.name, kind="pdf", title=_metadata_title(pdf))
     ocr_used = 0
     try:
         for index, page in enumerate(pdf, start=1):

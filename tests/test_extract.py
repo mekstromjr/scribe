@@ -174,3 +174,68 @@ class TestObsidianUri:
         from scribe.note import obsidian_uri
 
         assert "vault=My%20Vault" in obsidian_uri("My Vault", "+/N.md")
+
+
+class TestTitleLadder:
+    """scribe#9: metadata title, then the model's, then the filename stem. '03-dynprog'
+    is not a title."""
+
+    def _doc(self, source, title, kind="pdf"):
+        from scribe.document import Document
+        return Document(source=source, kind=kind, title=title)
+
+    def _sum(self, title):
+        from scribe.summarize import Summary
+        return Summary(title=title, tldr="", summary="")
+
+    def test_junk_filter(self):
+        from scribe.note import is_junk_title
+
+        for junk in ("03-dynprog", "monetary20250618a1", "Microsoft Word - final.docx",
+                     "untitled", "IMG_4821", "", "  ", "x", "report_v2.pdf", "2024-01-15"):
+            assert is_junk_title(junk), junk
+        for real in ("Federal Reserve issues FOMC statement", "Liber Abaci", "Dune",
+                     "Attention Is All You Need", "Algorithms, Chapter 3: Dynamic Programming"):
+            assert not is_junk_title(real), real
+
+    def test_pdf_metadata_title_wins(self):
+        from scribe.note import note_title
+        doc = self._doc("monetary20250618a1.pdf", "Federal Reserve issues FOMC statement")
+        assert note_title(doc, self._sum("FOMC Holds Rates")) == \
+            "Federal Reserve issues FOMC statement"
+
+    def test_no_metadata_falls_to_model_not_filename(self):
+        from scribe.note import note_title
+        doc = self._doc("03-dynprog.pdf", None)
+        assert note_title(doc, self._sum("Algorithms, Chapter 3: Dynamic Programming")) == \
+            "Algorithms, Chapter 3: Dynamic Programming"
+
+    def test_filename_stem_is_the_last_resort(self):
+        from scribe.note import note_title
+        doc = self._doc("03-dynprog.pdf", None)
+        assert note_title(doc, self._sum("")) == "03-dynprog"
+
+    def test_junk_model_title_falls_to_stem(self):
+        from scribe.note import note_title
+        doc = self._doc("Quarterly Letter.pdf", None)
+        assert note_title(doc, self._sum("untitled")) == "Quarterly Letter"
+
+    def test_metadata_title_reader_on_a_real_file(self):
+        """The sample recipe PDF carries no Title; the reader yields None so the model's
+        title takes over. (Not via extract_pdf: that sample has no text layer and would
+        try to OCR.)"""
+        import pypdfium2 as pdfium
+
+        from scribe.extract.pdf import _metadata_title
+        pdf = pdfium.PdfDocument(str(SAMPLES / "mediterranean-potato-salad.pdf"))
+        try:
+            got = _metadata_title(pdf)
+        finally:
+            pdf.close()
+        assert got is None or not got.lower().startswith("mediterranean-potato")
+
+    def test_image_has_no_filename_title(self, tmp_path):
+        from scribe.document import Document
+        from scribe.note import note_title
+        doc = Document(source="IMG_4821.jpg", kind="image", title=None)
+        assert note_title(doc, self._sum("Whiteboard: Sprint Plan")) == "Whiteboard: Sprint Plan"

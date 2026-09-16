@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from pathlib import Path
 from urllib.parse import quote
 
 from scribe.document import Document, Method
@@ -92,15 +93,57 @@ def _provenance(doc: Document, summary: Summary, model: str) -> str:
     return " · ".join(parts)
 
 
-def note_title(doc: Document, summary: Summary) -> str:
-    """The source's own title wins over the model's.
+# Titles that name the file's export path rather than its content. A slug has no spaces
+# and leans on digits or separators; office suites stamp their own prefix; some
+# generators leave a placeholder. Any of these loses to the model's title (scribe#9).
+_JUNK_PREFIXES = ("microsoft word - ", "microsoft powerpoint - ", "untitled", "document",
+                  "scan", "img_", "image", "download", "final", "draft", "copy of ")
+_JUNK_SUFFIXES = (".pdf", ".doc", ".docx", ".tex", ".pptx", ".txt")
 
-    The model writes a reasonable title, but it paraphrases — and the name you go looking
-    for later is the one the article actually had. For files the source title is the
-    filename stem, which is likewise what you would search for. Falls back to the model
-    only when the source has no usable title (some pages expose none).
+
+def is_junk_title(title: str | None) -> bool:
+    """True when a candidate title is a filename in disguise, not a title.
+
+    '03-dynprog', 'monetary20250618a1', 'Microsoft Word - final.docx' are all junk;
+    'Federal Reserve issues FOMC statement' and 'Liber Abaci' are not. The test is
+    deliberately lenient toward real titles: a false 'junk' only costs falling through
+    to the model's title, which is a decent title too.
     """
-    return (doc.title or "").strip() or summary.title
+    s = (title or "").strip()
+    if len(s) < 3:
+        return True
+    low = s.lower()
+    if low.startswith(_JUNK_PREFIXES) or low.endswith(_JUNK_SUFFIXES):
+        return True
+    if " " not in s:
+        # One token: a real one-word title exists ("Dune"), but a token with digits or
+        # separators in it is a slug.
+        return any(c.isdigit() or c in "-_." for c in s)
+    letters = sum(c.isalpha() or c.isspace() for c in s) / len(s)
+    return letters < 0.6
+
+
+def note_title(doc: Document, summary: Summary) -> str:
+    """Best-effort title ladder (scribe#9): the source's own title when it has a real
+    one, then the model's, then the filename stem as a last resort.
+
+    For a link, `doc.title` is the page's <title>, which is what you would search for
+    later. For a file, the extractor sets `doc.title` from PDF metadata and leaves it
+    None when that is empty or junk (LaTeX PDFs ship no title; Word stamps
+    "Microsoft Word - x.docx"), so the model's title takes over. The filename stem only
+    wins when the model produced nothing, because "03-dynprog" is not a title.
+    """
+    own = (doc.title or "").strip()
+    if own and not is_junk_title(own):
+        return own
+    model = (summary.title or "").strip()
+    if model and not is_junk_title(model):
+        return model
+    stem = Path(doc.source).stem if doc.kind != "link" else doc.source
+    if not is_junk_title(stem):
+        return stem
+    # Everything is junk: the stem is the most searchable junk, but an empty one loses.
+    return stem or own or model
 
 
 def obsidian_uri(vault_name: str, note_path: str) -> str:
