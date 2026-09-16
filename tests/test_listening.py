@@ -308,3 +308,124 @@ class TestLintScript:
         )
         chapters = [Chapter("Full article", [clean_for_listening(raw)])]
         assert lint_script(chapters) == []
+
+
+class TestPdfReflow:
+    """scribe#10: PDFium gives lines, not paragraphs; segments used to end at page
+    breaks mid-sentence. Reflow rebuilds paragraphs from line shape."""
+
+    def test_soft_wraps_join_and_ragged_last_line_ends_paragraph(self):
+        from scribe.listening import reflow_pdf_text
+        page = (
+            "This is the first line of a paragraph that wraps across several printed\n"
+            "lines because the column is narrow and the sentence is long enough to\n"
+            "need it. Here it ends.\n"
+            "A new paragraph starts here and also wraps onto the following printed\n"
+            "line before it is done."
+        )
+        out = reflow_pdf_text(page)
+        paras = out.split("\n\n")
+        assert len(paras) == 2
+        assert paras[0].startswith("This is the first") and paras[0].endswith("Here it ends.")
+        assert "\n" not in paras[0]
+
+    def test_page_join_inside_a_sentence_is_healed(self):
+        from scribe.listening import reflow_pdf_text
+        text = (
+            "The algorithm proceeds by filling the table row by row, and each entry\n"
+            "depends only on entries computed earlier in the same row or the previous\n"
+            "\n"
+            "row, which is exactly what makes the memoized version fast. That is all."
+        )
+        out = reflow_pdf_text(text)
+        assert "previous row, which" in out
+        assert out.count("\n\n") == 0
+
+    def test_hyphenated_wrap_is_rejoined(self):
+        from scribe.listening import reflow_pdf_text
+        out = reflow_pdf_text("We analyse the dyn-\namic programming table carefully here.")
+        assert "dynamic programming" in out
+
+    def test_pseudocode_and_figure_label_runs_are_dropped(self):
+        from scribe.listening import reflow_pdf_text
+        text = (
+            "Unfortunately, this naive recursive algorithm is horribly slow, as we\n"
+            "will now see in some detail.\n"
+            "F5\nF3 F4\nF2 F1\nF1 F0\nreturn 0\n"
+            "Except for the recursive calls, the entire algorithm requires only a\n"
+            "constant number of steps to run."
+        )
+        out = reflow_pdf_text(text)
+        assert "F3 F4" not in out and "return 0" not in out
+        assert "horribly slow" in out and "constant number" in out
+
+    def test_numbered_heading_gets_its_own_line(self):
+        from scribe.listening import reflow_pdf_text
+        text = (
+            "and so the previous section ends with this sentence.\n"
+            "3.2 Aside: Even Faster Fibonacci Numbers\n"
+            "The recurrence can be solved faster still, as the following argument\n"
+            "shows in some detail."
+        )
+        paras = reflow_pdf_text(text).split("\n\n")
+        assert paras[1] == "3.2 Aside: Even Faster Fibonacci Numbers"
+
+
+class TestMissingGlyphRepair:
+    def test_ligatures_inside_words(self):
+        from scribe.listening import _repair_missing_glyphs as fix
+        assert fix("their e￾orts at the o￾ce") == "their efforts at the office"
+        assert fix("we de￾ne it") == "we define it"
+
+    def test_word_initial_ligature(self):
+        from scribe.listening import _repair_missing_glyphs as fix
+        assert fix("the ￾￾￾ow of ￾￾￾￾￾￾￾￾ rst") \
+            .startswith("the flow of")
+
+    def test_standalone_runs_vanish(self):
+        from scribe.listening import _repair_missing_glyphs as fix
+        assert fix("n ￾ 1") == "n  1"
+        assert fix("Each￾￾See, I told you") == "Each See, I told you"
+
+    def test_unknown_word_still_gets_a_plausible_guess(self):
+        from scribe.listening import _repair_missing_glyphs as fix
+        assert "￾" not in fix("zorbl￾ng")
+
+
+class TestSentenceSplit:
+    def test_abbreviations_do_not_split(self):
+        from scribe.listening import _split_sentences
+        s = _split_sentences("As shown by Smith et al. 2020, see Fig. 3 and e.g. Eq. 4. Done here.")
+        assert len(s) == 2 and s[0].endswith("Eq. 4.")
+
+    def test_bare_list_marker_stays_with_its_item(self):
+        from scribe.listening import _split_sentences
+        got = _split_sentences("3. Third item here. Next one.")
+        assert got == ["3. Third item here.", "Next one."]
+
+    def test_a_year_ends_a_sentence(self):
+        from scribe.listening import _split_sentences
+        assert len(_split_sentences("It happened in 2020. Then more.")) == 2
+
+
+class TestHeadingHeuristicTightening:
+    def test_diacritic_residue_is_tolerated(self):
+        from scribe.listening import _looks_like_pdf_heading as h
+        assert h("3.1. Matr ¯ avr ¯ .tta")
+
+    def test_formula_author_and_table_lines_are_not_headings(self):
+        from scribe.listening import _looks_like_pdf_heading as h
+        assert not h("0 if j > n")
+        assert not h("Aidan N. Gomez∗ †")
+        assert not h("EN-DE EN-FR EN-DE EN-FR")
+
+    def test_real_headings_still_pass(self):
+        from scribe.listening import _looks_like_pdf_heading as h
+        for line in ("3.2 Aside: Even Faster Fibonacci Numbers", "Recursive Structure",
+                     "2 Background", "IV. Results"):
+            assert h(line), line
+
+    def test_markdown_heading_without_letters_is_not_a_section(self):
+        from scribe.listening import detect_sections
+        text = "# #&#&\n\nbody one\n\n# &#&#\n\nbody two\n"
+        assert detect_sections(text) == []
