@@ -19,6 +19,7 @@ from collections import Counter
 from dataclasses import dataclass
 
 from scribe.document import Document
+from scribe.note import note_title
 from scribe.summarize import Summary
 
 # HTML that survives extraction (trafilatura keeps some inline tags). <sup> blocks go
@@ -167,6 +168,152 @@ _STRAY_BRACKET = re.compile(r"[\[\]]")
 _OPEN_SENTINEL, _CLOSE_SENTINEL = "\x00", "\x01"
 
 
+# --- PDF text-layer reflow (scribe#10) -------------------------------------------
+# PDFium returns one line per printed line and NO paragraph marks, so a whole page
+# arrives as one "paragraph" and every segment boundary landed at a page break, mid
+# sentence (33 of 57 boundaries on a 62-page chapter, measured 2026-09-16). The reflow
+# rebuilds paragraphs from line shape: a paragraph ends where a line is short for its
+# page AND ends a sentence. Everything else is a soft wrap and gets joined.
+
+_TERMINAL = ('.', '!', '?', '"', '”', '’', ')', ':')
+# Missing-glyph codepoints: U+FFFE/U+FFFF and the private-use area, which is where
+# PDFium lands a glyph the font maps to no Unicode (ligatures, math minus, footnote
+# superscripts in LaTeX-era PDFs).
+_MISSING_GLYPH = re.compile(r"[\ufffe\uffff\ue000-\uf8ff]+")
+_MISSING_IN_WORD = re.compile(r"(?<=[a-z])[\ufffe\uffff\ue000-\uf8ff]+(?=[a-z])")
+# Between a word and a Capital it is a footnote superscript glued to the next
+# sentence ("Each\ufffe\ufffeSee, I told you"): a space, not a ligature.
+_MISSING_BETWEEN = re.compile(r"(?<=[a-z.,;:!?])[\ufffe\uffff\ue000-\uf8ff]+(?=[A-Z])")
+_MISSING_WORD_START = re.compile(r"(?<![A-Za-z])[\ufffe\uffff\ue000-\uf8ff]+(?=[a-z]{2})")
+# Ligature candidates, longest first; a small lexicon decides. Best effort: a wrong
+# guess is still a word-shaped sound, which beats a hole or a "replacement character".
+_LIGATURES = ("ffi", "ffl", "ff", "fi", "fl")
+_LIGATURE_TEXT = """
+affair affairs affect affected affecting affects affirm affix afflict affluent afford
+affordable affords afield aflame afloat amplifier amplify artificial baffle beneficial benefit
+benefits briefly buffalo buffer buffers butterfly caffeine camouflage certificate certified
+certify chaffing clarify classified classify cliff cliffs codify coefficient coefficients
+coffee confidence confident configuration configure confine confirm conflict conflicts cuff
+defiance deficit define defined defines defining definite definitely definition definitions
+deflate deflect diff differ difference differences different differential differentiate differs
+difficult difficulties difficulty diffuse diffusion dignified edifice effect effective
+effectively effects efficacy efficiency efficient efficiently effort efforts field fields
+fierce fifth fifty fight figure figures file filed files filing fill filled film filter final
+finally finance financial find finding findings fine finger finish finished finite fire firm
+first fish fist fit fitness five fix fixed fixes flag flags flame flat flavor flaw flawless
+fleet flesh flew flex flexibility flexible flick flight flip float floated floating flock flood
+floor flop floppy flour flourish flow flowed flowing flows fluctuate fluent fluid flush flux
+fly flyer gaffe giraffe graffiti gratified griffin handoff huff identified identifier identify
+infinite infinity inflate inflation inflect inflexible inflict inflow influence influenced
+influences influential jiffy justified justify kickoff layoff magnificent modified modifier
+modify muffin muffle notified notify off offer offered offering offers office officer official
+officially offline offset offspring overflow pacific payoff profile profit profitable puff
+purified qualified qualify raffle ratified rectify refine refined reflect reflected reflecting
+reflection reflects reflex reflux riff rifle ruffle satisfied satisfy scaffold scientific scoff
+scuffle sheriff shuffle significant significantly signified simplify sniff snowflake specific
+specifically specification specified specifies specify staff stiff stifle stuff suffer
+suffering suffice sufficient sufficiently suffix tariff terrified testify toffee traffic trifle
+unified uniform unify verified verify waffle whiff workflow
+"""
+_LIGATURE_WORDS = frozenset(_LIGATURE_TEXT.split())
+
+
+def _repair_missing_glyphs(text: str) -> str:
+    """Replace missing-glyph runs: a plausible ligature inside or in front of a word,
+    nothing everywhere else (footnote superscripts, math minus signs)."""
+    def guess(before: str, after: str, at_start: bool) -> str:
+        for lig in _LIGATURES:
+            if (before + lig + after).lower() in _LIGATURE_WORDS:
+                return lig
+        return "fi" if at_start else "ff"
+
+    def in_word(m: re.Match[str]) -> str:
+        start = m.start()
+        i = start
+        while i > 0 and text[i - 1].isalpha():
+            i -= 1
+        j = m.end()
+        while j < len(text) and text[j].isalpha():
+            j += 1
+        return guess(text[i:start], text[m.end():j], at_start=False)
+
+    def at_start(m: re.Match[str]) -> str:
+        j = m.end()
+        while j < len(text) and text[j].isalpha():
+            j += 1
+        return guess("", text[m.end():j], at_start=True)
+
+    text = _MISSING_IN_WORD.sub(in_word, text)
+    text = _MISSING_BETWEEN.sub(" ", text)
+    text = _MISSING_WORD_START.sub(at_start, text)
+    return _MISSING_GLYPH.sub("", text)
+
+
+def _short_line_run(lines: list[str], i: int, min_run: int = 3, max_len: int = 32) -> int:
+    """Length of the run of consecutive short, sentence-less lines starting at i, if it
+    is at least ``min_run`` long; else 0. Pseudocode blocks and figure labels ("F5",
+    "F3 F4", "return 0") arrive exactly like this and are noise when spoken."""
+    n = 0
+    while i + n < len(lines):
+        ln = lines[i + n].strip()
+        if not ln or len(ln) > max_len or ln.endswith(_TERMINAL):
+            break
+        n += 1
+    return n if n >= min_run else 0
+
+
+def reflow_pdf_text(text: str) -> str:
+    """Rebuild paragraphs from a PDF text layer: join soft wraps, keep real breaks,
+    heal sentences split across pages, drop pseudocode/figure-label runs.
+
+    A break is a paragraph end when the line ends a sentence AND is short for its
+    page (the ragged last line), or when the next line looks like a heading. A blank
+    line is a break only if the sentence actually ended; page-join blanks inside a
+    sentence are joined. Everything else is a soft wrap.
+    """
+    lines = [ln.rstrip() for ln in text.splitlines()]
+    body_lens = sorted(len(ln) for ln in lines if len(ln) >= 40)
+    typical = body_lens[len(body_lens) // 2] if body_lens else 80
+    short = 0.8 * typical
+
+    out: list[str] = []
+    para: list[str] = []
+    i = 0
+    while i < len(lines):
+        run = _short_line_run(lines, i)
+        if run:
+            i += run
+            continue
+        ln = lines[i].strip()
+        if not ln:
+            # Blank line: a real break only if the sentence ended.
+            if para and para[-1].endswith(_TERMINAL):
+                out.append(" ".join(para))
+                para = []
+            i += 1
+            continue
+        if _looks_like_pdf_heading(ln) and (not para or para[-1].endswith(_TERMINAL)):
+            if para:
+                out.append(" ".join(para))
+                para = []
+            out.append(ln)
+            i += 1
+            continue
+        if para and para[-1].endswith("-") and ln[:1].islower():
+            para[-1] = para[-1][:-1] + ln     # hyphenated wrap
+        else:
+            para.append(ln)
+        ends = ln.endswith(_TERMINAL) and len(ln) < short
+        nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+        if ends or (nxt and _looks_like_pdf_heading(nxt) and ln.endswith(_TERMINAL)):
+            out.append(" ".join(para))
+            para = []
+        i += 1
+    if para:
+        out.append(" ".join(para))
+    return "\n\n".join(p for p in out if p.strip())
+
+
 def prepare_document(text: str) -> str:
     """Document-level pass: hygiene, then cut everything from the end matter on.
 
@@ -174,6 +321,7 @@ def prepare_document(text: str) -> str:
     its headings — the body pass turns them into spoken sentences, which destroys the
     structure chapters are built from.
     """
+    text = _repair_missing_glyphs(text)
     text = _document_hygiene(text)
     m = _END_MATTER.search(text)
     return text[: m.start()] if m else text
@@ -223,6 +371,32 @@ def clean_for_listening(text: str) -> str:
     return clean_body(prepare_document(text))
 
 
+# Sentence-end candidates that are not: common abbreviations, initials, list numbers,
+# decimals broken by a space. Splitting there put a prosody reset inside "et al. 2020"
+# and "Fig. 3" on every boundary the paragraph splitter could not use.
+_ABBREVIATIONS = re.compile(
+    r"\b(?:e\.g|i\.e|et al|etc|vs|cf|viz|approx|resp|Fig|Figs|Eq|Eqs|Sec|Ch|Chap|Vol|No|Nos|"
+    r"pp?|Dr|Mr|Mrs|Ms|Prof|Sr|Jr|St|Mt|Inc|Ltd|Co|Corp|U\.S|U\.K|Ph\.D|a\.m|p\.m|"
+    r"[A-Z])\.$",
+    re.IGNORECASE,
+)
+_SENTENCE_END = re.compile(
+    r"(?:(?<=[.!?])|(?<=[.!?][\"\u201d\u2019)]))\s+(?=[A-Z0-9\"\u201c(])"
+)
+
+
+def _split_sentences(para: str) -> list[str]:
+    parts = _SENTENCE_END.split(para)
+    out: list[str] = []
+    for part in parts:
+        # A bare list marker ("3.") is not a sentence; "in 2020." is.
+        if out and (_ABBREVIATIONS.search(out[-1]) or re.fullmatch(r"\d{1,3}\.", out[-1].strip())):
+            out[-1] = f"{out[-1]} {part}"
+        else:
+            out.append(part)
+    return out
+
+
 def split_segments(text: str, max_chars: int) -> list[str]:
     """Split on paragraph boundaries into segments of at most ``max_chars``.
 
@@ -245,7 +419,7 @@ def split_segments(text: str, max_chars: int) -> list[str]:
             continue
         if len(para) > max_chars:
             flush()
-            sentences = re.split(r"(?<=[.!?])\s+", para)
+            sentences = _split_sentences(para)
             buf = ""
             for s in sentences:
                 if buf and len(buf) + len(s) + 1 > max_chars:
@@ -337,6 +511,11 @@ _MIN_CHAPTER_CHARS = 700
 _MAX_CHAPTERS = 20
 
 
+_DIACRITIC_RESIDUE = re.compile(
+    r"\s?[\u00af\u02d9\u02d8\u00b4\u0060\u005e\u00a8\u02dc]\s?|\.(?=[a-z])"
+)
+
+
 def _looks_like_pdf_heading(line: str) -> bool:
     """Heuristic heading test for text layers that carry no markup.
 
@@ -344,22 +523,43 @@ def _looks_like_pdf_heading(line: str) -> bool:
     chapter marker inside a sentence, which is worse than a missed heading (whose
     only cost is a longer chapter).
     """
-    s = line.strip()
+    # Detached diacritics from LaTeX text layers ("Matr ¯ avr ¯ .tta") are not
+    # letters and would sink the ratio; judge the line without them.
+    s = _DIACRITIC_RESIDUE.sub("", line).strip()
     if not (3 <= len(s) <= 80) or s.endswith((".", ",", ";", ":", "?", "!")):
         return False
     # Mostly-letters test, before anything else: it is what separates a heading from
     # a table row or a formula. ") O(1) O(logk(n))" scores 0.53 and is rejected;
     # "3.2 Decidability" scores 0.81 and survives.
-    if sum(c.isalpha() or c.isspace() for c in s) / len(s) < 0.75:
+    m = _NUMBERED_HEADING.match(s)
+    # Judge the TITLE part: "3.1. Matravrtta" is a heading even though its numbering
+    # drags the whole line's letter ratio under the bar.
+    core = m.group(1) if m else s
+    if sum(c.isalpha() or c.isspace() for c in core) / len(core) < 0.75:
         return False
-    if _NUMBERED_HEADING.match(s):
-        return True
     words = s.split()
+    # Author lines carry affiliation marks; table headers repeat their tokens; a real
+    # heading has at least one word of three letters. None of those is navigation.
+    if any(c in s for c in "\u2217\u2020\u2021*") or not any(
+        sum(ch.isalpha() for ch in w) >= 3 for w in words
+    ):
+        return False
+    if len(words) >= 4 and len(set(words)) <= len(words) // 2:
+        return False
+    # Figure text rendered as one line: interpunct/bullet separators, or a "word"
+    # longer than any English heading word (glyphs of two labels interleaved).
+    if any(c in s for c in "\u00b7\u2022") or any(len(w) > 16 for w in words):
+        return False
+    if m:
+        # "3.1 Matravrtta" yes; "0 if j > n" (a formula line) no: the title must
+        # start with a letter and read as a title, not a clause.
+        title = m.group(1)
+        return title[:1].isalpha() and title[:1].isupper()
     if not (1 <= len(words) <= 10):
         return False
-    # ALL CAPS, or Title Case with no lowercase-only leading word.
+    # ALL CAPS needs two real words: "ALTR U" is a garbled small-caps identifier.
     if s.isupper():
-        return True
+        return sum(1 for w in words if sum(c.isalpha() for c in w) >= 3) >= 2
     return all(w[0].isupper() or not w[0].isalpha() for w in words) and any(
         w[0].isupper() for w in words
     )
@@ -372,7 +572,10 @@ def detect_sections(text: str) -> list[tuple[str, str]]:
     the fallback. Returns [] rather than guessing when nothing is confident enough —
     the caller then produces today's single "Full article" chapter.
     """
-    headings = list(_MD_HEADING.finditer(text))
+    # A heading needs letters: PDF figure debris like "# #&#&" satisfies the markdown
+    # shape and used to become a chapter called "#&#&#&#".
+    headings = [m for m in _MD_HEADING.finditer(text)
+                if sum(c.isalpha() for c in m.group(2)) >= 2]
     if headings:
         # Coarsest level that actually divides the document. The `# Title` line is
         # usually alone at level 1, so this naturally lands on `##`.
@@ -425,7 +628,10 @@ def detect_sections(text: str) -> list[tuple[str, str]]:
 
 def _chapter_title(heading: str) -> str:
     """Player-friendly chapter label: cleaned of markup, truncated at a word."""
-    label = clean_body(heading).rstrip(".").strip() or heading.strip()
+    # Leading symbol residue ("\u21223.2 Aside") is a glyph the font could not map.
+    heading = _DIACRITIC_RESIDUE.sub("", heading)
+    label = clean_body(heading).rstrip(".").strip().lstrip("\u2122\u00a9\u00ae\u2020\u2021*# ")
+    label = label or heading.strip()
     if len(label) <= 60:
         return label
     return label[:60].rsplit(" ", 1)[0] + "..."
@@ -457,13 +663,16 @@ def _consolidate(sections: list[tuple[str, str]]) -> list[tuple[str, str]]:
 
 def build_script(doc: Document, summary: Summary, *, max_chars: int) -> list[Chapter]:
     """Summary chapter first, then the article — the agreed listening order."""
-    title = (doc.title or summary.title or "Untitled").strip()
+    title = note_title(doc, summary).strip() or "Untitled"
     summary_text = clean_for_listening(
         f"{title}.\n\nSummary.\n\n{summary.tldr}\n\n{summary.summary}"
     )
     chapters = [Chapter("Summary", split_segments(summary_text, max_chars))]
 
     prepared = prepare_document(doc.text)
+    if doc.kind == "pdf":
+        # Text layers carry line breaks, not paragraphs (see reflow_pdf_text).
+        prepared = reflow_pdf_text(prepared)
     sections = _consolidate(detect_sections(prepared))
     lead = "End of summary. The full article begins now."
 
@@ -471,7 +680,7 @@ def build_script(doc: Document, summary: Summary, *, max_chars: int) -> list[Cha
         for n, (heading, body) in enumerate(sections):
             # The heading is spoken at the top of its own chapter — a listener who
             # jumps to a chapter should hear what it is.
-            spoken = clean_body(f"{heading}.\n\n{body}")
+            spoken = clean_body(f"{_DIACRITIC_RESIDUE.sub('', heading)}.\n\n{body}")
             if not spoken:
                 continue
             if n == 0:
