@@ -134,6 +134,22 @@ One cost to know about: Kokoro keeps every voice tensor it has served resident, 
 distinct voice in regular use is memory for the life of the TTS server. Two or three is
 fine; the bot says so once when someone picks a voice other than the shared default.
 
+## Two workers, two stages
+
+Summarizing is Ollama-bound and Ollama serves one request at a time, so there is one
+summarize worker. Audio is Kokoro-bound, a different server, so it has its own worker:
+the moment a document's note is posted, its audio half is written to the spool as an
+`AudioJob` and the summarize worker moves on. The next document's TL;DR lands while the
+last one's m4b is still being made.
+
+- **The hand-off is through the spool, not memory.** An audio job that was promised
+  survives a restart; on start-up audio jobs resume first, silently, because their
+  threads already have a note.
+- **The sender's TTS settings are frozen in the record.** A voice change typed while a
+  job waits for audio applies to the next document, not the one already acknowledged.
+- **Cancel still finds it.** Both halves register under the same id, so "cancel" in the
+  thread drops a waiting audio job, or stops a running one at its next segment.
+
 ## Note delivery
 
 The full note is posted into the Slack thread as a file, right after the TL;DR reply, in
