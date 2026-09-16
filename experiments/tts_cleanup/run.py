@@ -62,6 +62,31 @@ RULES — you MUST follow these:
 - If no fixes are needed, return the text unchanged.
 """
 
+# Second prompt, added after the first run (2026-09-16): the legacy prompt's rule 6 asks
+# for MARKDOWN formatting, which its pipeline stripped afterwards and which a speech
+# script must never contain. Same rules otherwise, framed for listening.
+SPEECH_PROMPT = """\
+You are a text-cleaning assistant for a text-to-speech pipeline. The text you receive \
+will be READ ALOUD by a speech synthesizer exactly as written. It was extracted from a \
+web page or PDF and already cleaned by rules. Fix ONLY these problems:
+
+1. Split or joined words — use context to fix. E.g. "it's away" → "it's a way", \
+"selfreport" → "self-report".
+2. Navigation, header, footer, caption or citation debris stuck into the prose — remove it.
+3. Orphaned fragments that do not form a complete thought — remove them.
+4. Text smushed into one long block — restore paragraph breaks where the topic or speaker \
+changes.
+5. Content that clearly belongs to a different document — remove it entirely.
+
+RULES — you MUST follow these:
+- Plain prose only. NO markdown, NO asterisks, NO heading marks, NO brackets, NO URLs.
+- NEVER paraphrase, summarize, or add new content.
+- NEVER change the meaning or wording of sentences.
+- Preserve the original punctuation.
+- Return ONLY the cleaned text, no explanations or commentary.
+- If no fixes are needed, return the text unchanged.
+"""
+
 LLM_CHUNK_CHARS = 6000  # legacy pipeline's chunk size, paragraph-packed
 
 
@@ -85,8 +110,8 @@ def chunk_paragraphs(text: str, max_chars: int) -> list[str]:
     return chunks
 
 
-def llm_polish(settings, text: str) -> tuple[str, float, int]:
-    """Legacy repair prompt, chunk by chunk, against the production text model.
+def llm_polish(settings, text: str, prompt: str = SYSTEM_PROMPT) -> tuple[str, float, int]:
+    """Repair prompt, chunk by chunk, against the production text model.
     Returns (polished, seconds, prompt_tokens_total)."""
     out, seconds, ptok = [], 0.0, 0
     for i, chunk in enumerate(chunk_paragraphs(text, LLM_CHUNK_CHARS), 1):
@@ -98,7 +123,7 @@ def llm_polish(settings, text: str) -> tuple[str, float, int]:
                 "stream": False,
                 "think": False,
                 "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "system", "content": prompt},
                     {"role": "user", "content": chunk},
                 ],
                 "options": {
@@ -190,6 +215,13 @@ def phase_llm(settings, sources, out: Path) -> None:
             both, secs, ptok = llm_polish(settings, rules)
             (d / "both.txt").write_text(both)
             res["both"] = metrics("both", both, rules, secs) | {"prompt_tokens": ptok}
+            (d / "metrics.json").write_text(json.dumps(res, indent=2))
+
+        if "speech" not in res:
+            # rules, then the speech-framed prompt (no markdown rule)
+            sp, secs, ptok = llm_polish(settings, rules, prompt=SPEECH_PROMPT)
+            (d / "speech.txt").write_text(sp)
+            res["speech"] = metrics("speech", sp, rules, secs) | {"prompt_tokens": ptok}
             (d / "metrics.json").write_text(json.dumps(res, indent=2))
         log.info("%s: %s", src["id"],
                  {k: (v["lint_findings"], v["seconds"]) for k, v in res.items()})
