@@ -64,6 +64,8 @@ The app manifest declares four slash commands (`/scribevoice`, `/scribeformat`,
 commands and `files:write` so scribe can post the note file and the generated `.m4b`
 into the thread. `/scribeformat` replaced `/scribetoggleobs` in scribe#5; renaming a
 command is a manifest change, so it needs the same paste-and-reinstall as a new scope.
+Since scribe#6 every command is per user (append `default` for the shared layer); that
+needed no manifest change.
 
 If the app already exists, applying an updated manifest is not enough on its own —
 **Slack requires a reinstall to grant newly added scopes**. In the app's settings:

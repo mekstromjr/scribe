@@ -118,6 +118,22 @@ the models it serves, and fails if the expected models are missing.
   Wikimedia's robot policy asks automated clients to declare themselves; complying works
   better than evading.
 
+## Runtime settings are per person
+
+`/scribevoice`, `/scribeformat` and `/scribetoggletts` change the settings of whoever
+runs them, keyed by Slack user id, and each document is processed under its sender's
+settings. Nobody has to fight over the voice. Append `default` to a command to change
+the shared layer everyone falls back to instead; `/scribeconfig` shows your settings,
+the shared defaults, and which keys you have overridden.
+
+Resolution order, narrowest first: your overrides, the shared overrides, environment,
+code default. Overrides live in `config.json` beside the spool and hold only keys that
+were explicitly set, so a manifest change to an untouched key still takes effect.
+
+One cost to know about: Kokoro keeps every voice tensor it has served resident, so each
+distinct voice in regular use is memory for the life of the TTS server. Two or three is
+fine; the bot says so once when someone picks a voice other than the shared default.
+
 ## Note delivery
 
 The full note is posted into the Slack thread as a file, right after the TL;DR reply, in
