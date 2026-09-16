@@ -18,9 +18,9 @@
         "should_escape": false
       },
       {
-        "command": "/scribetoggleobs",
-        "description": "Turn Obsidian vault publishing on or off",
-        "usage_hint": "[on|off]",
+        "command": "/scribeformat",
+        "description": "Choose how the full note is delivered: pdf, md, docx, or none",
+        "usage_hint": "[pdf|md|docx|none]",
         "should_escape": false
       },
       {

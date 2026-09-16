@@ -25,7 +25,7 @@ log = logging.getLogger("scribe.runtime_config")
 
 # Only these may be set from chat. An allowlist, not an open key/value store: a typo'd
 # key would otherwise sit in the file looking authoritative and doing nothing.
-ALLOWED_KEYS = {"tts_voice", "tts_enabled", "vault_enabled"}
+ALLOWED_KEYS = {"tts_voice", "tts_enabled", "note_format"}
 
 
 def config_path(settings: Settings) -> Path:

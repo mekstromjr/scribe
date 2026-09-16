@@ -42,17 +42,16 @@ Socket Mode needs **two** tokens, and the manifest can only produce the first:
 secret/infra/scribe
   slack-bot-token   xoxb-...
   slack-app-token   xapp-...
-  gitlab-vault-token  <project access token, write_repository on mekadmin/mekvault>
 ```
 
-Locally, `SCRIBE_SLACK_BOT_TOKEN` / `SCRIBE_SLACK_APP_TOKEN` / `SCRIBE_GITLAB_TOKEN`.
+Locally, `SCRIBE_SLACK_BOT_TOKEN` / `SCRIBE_SLACK_APP_TOKEN`.
 
 ## Why these scopes
 
 Deliberately minimal. `im:history` plus `app_mentions:read` means scribe sees **only**
 DMs sent to it and messages that explicitly @-mention it. There is no
 `channels:history`, so it cannot read channel traffic it was not addressed in — a real
-privacy boundary for a bot that forwards content into a personal vault.
+privacy boundary for a bot that reads whatever it is handed.
 
 `socket_mode_enabled: true` is load-bearing: Slack cannot reach this network (the
 cluster is behind Tailscale CGNAT with no public ingress), so an outbound WebSocket is
@@ -60,9 +59,11 @@ what makes a Slack integration possible at all without exposing anything.
 
 ## Slash commands and the audio upload (scribe#2, home#174)
 
-The app manifest declares four slash commands (`/scribevoice`, `/scribetoggleobs`,
+The app manifest declares four slash commands (`/scribevoice`, `/scribeformat`,
 `/scribetoggletts`, `/scribeconfig`) and two extra scopes: `commands` for the slash
-commands and `files:write` so scribe can post the generated `.m4b` into the thread.
+commands and `files:write` so scribe can post the note file and the generated `.m4b`
+into the thread. `/scribeformat` replaced `/scribetoggleobs` in scribe#5; renaming a
+command is a manifest change, so it needs the same paste-and-reinstall as a new scope.
 
 If the app already exists, applying an updated manifest is not enough on its own —
 **Slack requires a reinstall to grant newly added scopes**. In the app's settings:

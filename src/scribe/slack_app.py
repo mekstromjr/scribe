@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -28,13 +29,13 @@ from scribe.audio import produce_audio
 from scribe.config import Settings, load_settings
 from scribe.eta import estimate_seconds, eta_line
 from scribe.extract import ExtractionError, extract
-from scribe.note import note_title, obsidian_uri, render, slugify
+from scribe.note import note_title, render, slugify
+from scribe.note_export import FORMATS, ExportError, export_note
 from scribe.ollama import OllamaError
 from scribe.queue import Job, complete, enqueue, page_cache, restore, spool
 from scribe.runtime_config import effective, set_value
 from scribe.summarize import summarize
 from scribe.tts import TTSError, voices
-from scribe.vault import VaultError, append_listen_link, publish, resolve_attachment
 
 log = logging.getLogger("scribe.slack")
 
@@ -45,9 +46,9 @@ _BARE_URL = re.compile(r"https?://\S+")
 HELP_WORDS = {"help", "?", "usage", "how does scribe work?", "how does this work?"}
 HELP_TEXT = (
     "Send me a *link*, *PDF*, or *image* — as a DM here, or @-mention me in a channel.\n\n"
-    "I extract the text, write a thorough summary, and save a note to your Obsidian vault "
-    "inbox (`+/`). You get the TL;DR back in thread with a link that opens the note in "
-    "Obsidian.\n\n"
+    "I extract the text, write a thorough summary, and reply in thread with the TL;DR "
+    "plus the full note as a file (PDF by default; `/scribeformat` picks pdf, md, docx, "
+    "or none).\n\n"
     "Documents are processed one at a time and a long article takes several minutes — "
     "I'll tell you where you are in the queue.\n\n"
     "Sent something by mistake? Reply *cancel* in its thread and I'll stop."
@@ -176,12 +177,11 @@ def download_file(settings: Settings, file_info: dict, dest: Path) -> Path:
     return dest
 
 
-def _audio_stage(settings: Settings, client, job: Job, doc, summary, note_path: str) -> None:
-    """Synthesize, upload to Audiobookshelf, link the note, and post the m4b in-thread.
+def _audio_stage(settings: Settings, client, job: Job, doc, summary) -> None:
+    """Synthesize, upload to Audiobookshelf, and post the m4b in-thread.
 
     Never raises. Each delivery step degrades independently: an ABS outage still posts
-    the file to Slack, a Slack upload failure still leaves the ABS link, and a vault
-    hiccup loses only the note's listen line.
+    the file to Slack, and a Slack upload failure still leaves the ABS link.
     """
     settings = effective(settings)
     title = note_title(doc, summary)
@@ -206,13 +206,6 @@ def _audio_stage(settings: Settings, client, job: Job, doc, summary, note_path: 
         except ABSError as exc:
             log.warning("ABS upload failed for %s: %s", job.source_label, exc)
             abs_line = f"_(Audiobookshelf upload failed: {exc})_"
-        else:
-            # No note to link when vault publishing is off.
-            if note_path:
-                try:
-                    append_listen_link(settings, note_path, link)
-                except VaultError as exc:
-                    log.warning("listen-link commit failed for %s: %s", note_path, exc)
 
         try:
             # files_upload_v2 needs files:write; posted into the same thread so the
@@ -233,6 +226,44 @@ def _audio_stage(settings: Settings, client, job: Job, doc, summary, note_path: 
             )
 
 
+def _note_stage(settings: Settings, client, job: Job, doc, summary) -> None:
+    """Render the note and post it in-thread as a file in the configured format.
+
+    Never raises, and never requeues: by the time this runs the summary exists and the
+    TL;DR is already in the thread, so an export failure costs the file, not the job.
+    Mirrors _audio_stage on purpose -- both are deliveries of a finished product.
+    """
+    fmt = settings.note_format
+    if fmt == "none":
+        return
+    title = note_title(doc, summary)
+    body = render(doc, summary, model=settings.text_model)
+    with tempfile.TemporaryDirectory(prefix="scribe-note-") as tmp:
+        try:
+            path = export_note(body, fmt, stem=slugify(title), out_dir=Path(tmp))
+        except ExportError as exc:
+            log.warning("note export (%s) failed for %s: %s", fmt, job.source_label, exc)
+            client.chat_postMessage(
+                channel=job.channel, thread_ts=job.thread_ts,
+                text=f"_(No {fmt} this time — rendering failed: {exc})_",
+            )
+            return
+        try:
+            client.files_upload_v2(
+                channel=job.channel,
+                thread_ts=job.thread_ts,
+                file=str(path),
+                filename=path.name,
+                title=title,
+            )
+        except Exception as exc:
+            log.warning("Slack note upload failed for %s: %s", job.source_label, exc)
+            client.chat_postMessage(
+                channel=job.channel, thread_ts=job.thread_ts,
+                text=f"_(The {fmt} was ready but the upload to Slack failed: {exc})_",
+            )
+
+
 def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
              active: _Active | None = None) -> None:
     """Run the pipeline and reply in-thread. Never raises — failures are reported to Slack."""
@@ -240,7 +271,6 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
     # while this document is mid-flight applies to the next one, so a job's behavior
     # never changes underneath the ack the user already received.
     settings = effective(settings)
-    local_file = Path(job.attachment) if job.attachment else None
     requeued = False
 
     def abort() -> None:
@@ -263,27 +293,8 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
             doc.title = Path(job.attachment_name).stem
         summary = summarize(settings, doc, abort=abort)
 
-        # Publishing is the point of no return: past here the note exists and cancel
-        # would leave more mess than it saves.
+        # Past here the TL;DR is posted and cancel would confuse more than it saves.
         abort()
-        result = {"note": ""}
-        if settings.vault_enabled:
-            attachment_path = (
-                resolve_attachment(settings, local_file, job.attachment_name)
-                if local_file
-                else None
-            )
-            body = render(
-                doc, summary, model=settings.text_model, attachment_link=attachment_path
-            )
-            result = publish(
-                settings,
-                note_body=body,
-                note_stem=slugify(note_title(doc, summary)),
-                attachment=local_file,
-                attachment_path=attachment_path,
-            )
-
         lines = [
             f"*{note_title(doc, summary)}*",
             # The source is repeated in the body, not just implied by the thread: Slack
@@ -295,15 +306,8 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
             summary.tldr,
             "",
         ]
-        if settings.vault_enabled:
-            note_name = Path(result["note"]).stem
-            uri = obsidian_uri(settings.obsidian_vault_name, result["note"])
-            # Deep link rather than just the name: tapping it opens the note directly
-            # in Obsidian on phone or laptop, which is the whole point of a read-later
-            # queue. Slack renders <uri|label>.
-            lines.append(f"Saved to your vault: <{uri}|{note_name}>")
-        else:
-            lines.append("_Vault publishing is off — this summary lives only here._")
+        if settings.note_format == "none":
+            lines.append("_Note delivery is off (`/scribeformat`) — this summary lives only here._")
         if summary.sections > 1:
             lines.append(
                 f"_Long document — summarized in {summary.sections} sections, so this "
@@ -317,15 +321,18 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
         client.chat_postMessage(
             channel=job.channel, thread_ts=job.thread_ts, text="\n".join(lines)
         )
+        # The full note follows the TL;DR as a file. Best-effort: the summary is the
+        # product and is already in the thread.
+        _note_stage(settings, client, job, doc, summary)
         # Audio AFTER the note reply, and best-effort: at Kokoro's measured 1.6x
         # realtime a long article synthesizes for tens of minutes, and a TTS failure
         # must never fail (or requeue) a job whose note already published.
         if settings.tts_enabled and settings.abs_token:
             if active and active.canceled(job.id):
-                # Canceled after the note published: keep the note, skip only the audio.
+                # Canceled after the note posted: keep the note, skip only the audio.
                 log.info("skipping audio for canceled job %s", job.id)
             else:
-                _audio_stage(settings, client, job, doc, summary, result["note"])
+                _audio_stage(settings, client, job, doc, summary)
     except JobCanceled:
         log.info("job %s canceled by its thread", job.id)
     except ExtractionError as exc:
@@ -336,8 +343,8 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
             thread_ts=job.thread_ts,
             text=f"Sorry — {job.source_label} failed: {exc}",
         )
-    except (OllamaError, VaultError) as exc:
-        # Transient: the model server or GitLab was unreachable. Retry rather than drop
+    except OllamaError as exc:
+        # Transient: the model server was unreachable. Retry rather than drop
         # the job. This is what lost a document when an ollama-mini rollout happened to
         # land while the queue was resuming.
         if job.attempts + 1 < settings.max_attempts:
@@ -437,7 +444,7 @@ def _register_config_commands(app: App, settings: Settings) -> None:
 
     def _state_line(s: Settings) -> str:
         return (
-            f"voice *{s.tts_voice}* · vault *{'on' if s.vault_enabled else 'off'}* · "
+            f"voice *{s.tts_voice}* · note *{s.note_format}* · "
             f"TTS *{'on' if s.tts_enabled else 'off'}*"
         )
 
@@ -484,14 +491,30 @@ def _register_config_commands(app: App, settings: Settings) -> None:
         set_value(settings, key, new)
         after = effective(settings)
         note = ""
-        if not after.vault_enabled and not after.tts_enabled:
+        if after.note_format == "none" and not after.tts_enabled:
             note = "\n_Both outputs are off — documents will only get a TL;DR in thread._"
         respond(f"{label} is now *{'on' if new else 'off'}*. {_state_line(after)}{note}")
 
-    @app.command("/scribetoggleobs")
-    def on_toggle_obs(ack, respond, command):
+    @app.command("/scribeformat")
+    def on_format(ack, respond, command):
+        """Pick the file format the full note is delivered in, or `none` for TL;DR only."""
         ack()
-        _toggle("vault_enabled", "Vault publishing", respond, command)
+        current = effective(settings)
+        wanted = (command.get("text") or "").strip().lower()
+        choices = ", ".join(f"`{f}`" for f in FORMATS)
+        if not wanted:
+            respond(f"Notes are delivered as *{current.note_format}*. Options: {choices}.")
+            return
+        if wanted not in FORMATS:
+            respond(f"`{wanted}` is not a note format. Options: {choices}.")
+            return
+        set_value(settings, "note_format", wanted)
+        after = effective(settings)
+        note = ""
+        if after.note_format == "none" and not after.tts_enabled:
+            note = "\n_Both outputs are off — documents will only get a TL;DR in thread._"
+        respond(f"Notes will be delivered as *{wanted}* from the next document. "
+                f"{_state_line(after)}{note}")
 
     @app.command("/scribetoggletts")
     def on_toggle_tts(ack, respond, command):
