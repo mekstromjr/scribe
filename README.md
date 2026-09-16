@@ -134,6 +134,36 @@ One cost to know about: Kokoro keeps every voice tensor it has served resident, 
 distinct voice in regular use is memory for the life of the TTS server. Two or three is
 fine; the bot says so once when someone picks a voice other than the shared default.
 
+## The listening script is rules, measured
+
+The text sent to Kokoro is produced by deterministic rules, not a model. An experiment
+on six real sources (2026-09-16, `experiments/tts_cleanup/`) compared the rules with the
+legacy LLM repair prompt, alone and on top of the rules, and a speech-framed rewrite of
+that prompt. The rules had the fewest artifacts on every source; every LLM variant added
+markup or removed content (a chapter's epigraphs, a paper's prose). So there is no LLM
+pass, and the artifact classes only a model could fix are recorded on the issue as the
+spec for a targeted span-repair if feedback ever calls for one.
+
+What the rules do for a PDF text layer, which arrives as printed lines with no paragraph
+marks:
+
+- **Reflow** rebuilds paragraphs from line shape: a paragraph ends where a line is short
+  for its page and ends a sentence. Soft wraps and hyphenated wraps are joined, a sentence
+  split across a page break is healed, and runs of short sentence-less lines, which is
+  what pseudocode and figure labels look like, are dropped. Measured on a 62-page chapter:
+  33 of 57 segment boundaries fell mid-sentence before, 2 after.
+- **Missing glyphs** (U+FFFE and private-use codepoints, where LaTeX PDFs put ligatures,
+  footnote superscripts and minus signs) become the ligature a small lexicon says fits
+  inside a word, a space between a word and a capital, and nothing elsewhere.
+- **Headings** are judged with detached diacritics removed, must contain a real word,
+  and may not look like an author line, a table header or figure text. The chapter list
+  on that textbook went from 3 entries to 21.
+- **Sentence splitting**, the fallback for an oversized paragraph, no longer breaks on
+  abbreviations, initials or bare list markers.
+
+`scribe listen --dry-run <file>` prints the script and its lint findings without
+synthesizing anything. A finding means a rule is missing.
+
 ## The estimate learns
 
 The ack quotes two times: when the summary will be in the thread, and when the audio
