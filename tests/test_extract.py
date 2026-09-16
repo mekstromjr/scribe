@@ -220,6 +220,7 @@ class TestTitleLadder:
         doc = self._doc("Quarterly Letter.pdf", None)
         assert note_title(doc, self._sum("untitled")) == "Quarterly Letter"
 
+    @pytest.mark.skipif(not SAMPLES.exists(), reason="recipe-pipeline samples not present")
     def test_metadata_title_reader_on_a_real_file(self):
         """The sample recipe PDF carries no Title; the reader yields None so the model's
         title takes over. (Not via extract_pdf: that sample has no text layer and would
