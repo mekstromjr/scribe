@@ -4,6 +4,7 @@ a job the user already canceled."""
 
 from __future__ import annotations
 
+import pathlib
 from types import SimpleNamespace
 
 from scribe import slack_app
@@ -106,13 +107,13 @@ class TestProcessCancellation:
         import scribe.summarize as sz
         monkeypatch.setattr(sz, "chat_structured", fake_chat)
 
-        published = []
-        monkeypatch.setattr(slack_app, "publish",
-                            lambda *a, **kw: published.append(1) or {"note": "n.md"})
+        exported = []
+        monkeypatch.setattr(slack_app, "export_note",
+                            lambda *a, **kw: exported.append(1) or pathlib.Path("n.pdf"))
         replies: list = []
         slack_app._process(settings, self._client(replies), job, active=active)
 
         assert calls["n"] <= 2, "must stop at the next chunk checkpoint, not finish"
-        assert published == [], "a canceled job must never publish"
+        assert exported == [], "a canceled job must never export a note"
         assert replies == []
         assert restore(settings) == []

@@ -56,7 +56,7 @@ class TestPersistence:
 class TestSafety:
     def test_unknown_keys_are_refused(self, settings):
         with pytest.raises(ValueError, match="not a runtime-configurable"):
-            set_value(settings, "gitlab_token", "sneaky")
+            set_value(settings, "abs_token", "sneaky")
 
     def test_corrupt_file_is_ignored_rather_than_fatal(self, settings):
         config_path(settings).parent.mkdir(parents=True, exist_ok=True)
@@ -70,4 +70,4 @@ class TestSafety:
         assert load(settings) == {"tts_voice": "af_sky"}
 
     def test_allowlist_is_exactly_the_three_toggles(self):
-        assert sorted(ALLOWED_KEYS) == ["tts_enabled", "tts_voice", "vault_enabled"]
+        assert sorted(ALLOWED_KEYS) == ["note_format", "tts_enabled", "tts_voice"]

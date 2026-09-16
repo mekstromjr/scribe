@@ -1,4 +1,4 @@
-"""scribe CLI: extract, summarize, publish to the vault, and run the Slack bot."""
+"""scribe CLI: extract, summarize, export a note file, and run the Slack bot."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ from scribe.config import load_settings
 from scribe.extract import ExtractionError, extract
 from scribe.extract.pdf import has_text_layer
 from scribe.note import note_title, render, slugify
+from scribe.note_export import FORMATS, ExportError, export_note
 from scribe.ollama import OllamaError, health
 from scribe.summarize import summarize
-from scribe.vault import VaultError, publish, resolve_attachment
 
 
 def _cmd_extract(args: argparse.Namespace) -> int:
@@ -34,7 +34,7 @@ def _cmd_extract(args: argparse.Namespace) -> int:
 
 
 def _cmd_note(args: argparse.Namespace) -> int:
-    """Extract -> summarize -> render the vault note. Prints the note; does not publish."""
+    """Extract -> summarize -> render the note. Prints the markdown; writes nothing."""
     settings = load_settings()
     try:
         doc = extract(settings, args.target)
@@ -65,8 +65,12 @@ def _cmd_note(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_publish(args: argparse.Namespace) -> int:
-    """Extract -> summarize -> render -> commit to the Obsidian vault."""
+def _cmd_export(args: argparse.Namespace) -> int:
+    """Extract -> summarize -> render -> write the note as pdf/md/docx.
+
+    The laptop twin of what the Slack bot posts in-thread; same renderer, same exporter,
+    so a format problem reproduces here without a Slack round trip.
+    """
     settings = load_settings()
     try:
         doc = extract(settings, args.target)
@@ -83,41 +87,16 @@ def _cmd_publish(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
-    # Local files travel with the note so the original is one click away in the vault.
-    # Links do not — the URL is already in the frontmatter.
-    source_file = None
-    if doc.kind in {"pdf", "image"}:
-        candidate = Path(args.target).expanduser()
-        if candidate.is_file():
-            source_file = candidate
-
+    body = render(doc, summary, model=settings.text_model)
     try:
-        # Resolved BEFORE rendering: the note wikilinks the attachment by its final
-        # name, which is only known after collision resolution.
-        attachment_path = resolve_attachment(settings, source_file) if source_file else None
-        if source_file and attachment_path is None:
-            print(
-                f"note: {source_file.name} exceeds the attachment size cap — "
-                "committing the note without it",
-                file=sys.stderr,
-            )
-        body = render(
-            doc, summary, model=settings.text_model, attachment_link=attachment_path
+        path = export_note(
+            body, args.format, stem=slugify(note_title(doc, summary)),
+            out_dir=Path(args.out_dir).expanduser(),
         )
-        result = publish(
-            settings,
-            note_body=body,
-            note_stem=slugify(note_title(doc, summary)),
-            attachment=source_file,
-            attachment_path=attachment_path,
-        )
-    except VaultError as exc:
+    except ExportError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-
-    print(f"published: {result['note']}")
-    if result["attachment"]:
-        print(f"attachment: {result['attachment']}")
+    print(f"wrote {path}")
     print(f"\nTL;DR — {summary.tldr}")
     return 0
 
@@ -261,14 +240,18 @@ def main() -> int:
     )
     p_extract.set_defaults(func=_cmd_extract)
 
-    p_note = sub.add_parser("note", help="extract, summarize, and render a vault note")
+    p_note = sub.add_parser("note", help="extract, summarize, and render the note markdown")
     p_note.add_argument("target")
     p_note.add_argument("--out-dir", help="write the note here instead of stdout")
     p_note.set_defaults(func=_cmd_note)
 
-    p_publish = sub.add_parser("publish", help="extract, summarize, and commit to the vault")
-    p_publish.add_argument("target")
-    p_publish.set_defaults(func=_cmd_publish)
+    p_export = sub.add_parser("export", help="extract, summarize, and write the note as a file")
+    p_export.add_argument("target")
+    p_export.add_argument(
+        "--format", choices=[f for f in FORMATS if f != "none"], default="pdf",
+    )
+    p_export.add_argument("--out-dir", default=".", help="directory to write into")
+    p_export.set_defaults(func=_cmd_export)
 
     p_listen = sub.add_parser(
         "listen", help="extract, summarize, synthesize, and package an .m4b"

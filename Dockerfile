@@ -3,9 +3,15 @@
 FROM python:3.12.11-slim-bookworm
 
 # ffmpeg: concatenates Kokoro's WAV segments and encodes the single AAC .m4b with
-# chapter markers (package.py). The only non-Python tool in the image.
+# chapter markers (package.py).
+# pandoc: renders the note markdown to docx, and to HTML for the PDF (note_export.py).
+# libpango/libcairo and friends: weasyprint's layout engine, which turns that HTML into
+# the PDF. No TeX -- a pandoc PDF via LaTeX would triple the image.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg pandoc \
+        libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 libcairo2 libgdk-pixbuf-2.0-0 \
+        fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:0.7.17 /uv /uvx /bin/
