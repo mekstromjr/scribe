@@ -317,3 +317,122 @@ class TestScribeFormatCommand:
     def test_old_vault_toggle_is_gone(self, tmp_path, monkeypatch):
         _, h = self._app(tmp_path, monkeypatch)
         assert "/scribetoggleobs" not in h
+
+
+class TestPerUserCommands:
+    """Commands write the invoking user's layer (scribe#6); `default` writes the shared one."""
+
+    def _handlers(self, tmp_path):
+        from scribe import slack_app
+        from scribe.config import Settings
+
+        settings = Settings(slack_bot_token="xoxb-x", slack_app_token="xapp-x",
+                            spool_dir=str(tmp_path / "q"))
+        handlers: dict = {}
+
+        class FakeApp:
+            def command(self, name):
+                def deco(fn):
+                    handlers[name] = fn
+                    return fn
+                return deco
+
+        slack_app._register_config_commands(FakeApp(), settings)
+        return settings, handlers
+
+    def _call(self, handler, text, user="U1"):
+        out = []
+        handler(ack=lambda: None, respond=out.append, command={"text": text, "user_id": user})
+        return out[-1]
+
+    def test_format_is_per_user(self, tmp_path):
+        from scribe.runtime_config import effective
+
+        settings, h = self._handlers(tmp_path)
+        assert "for you" in self._call(h["/scribeformat"], "md", user="U1")
+        assert effective(settings, "U1").note_format == "md"
+        assert effective(settings, "U2").note_format == "pdf"
+        assert effective(settings).note_format == "pdf"
+
+    def test_default_word_writes_the_shared_layer(self, tmp_path):
+        from scribe.runtime_config import effective
+
+        settings, h = self._handlers(tmp_path)
+        reply = self._call(h["/scribeformat"], "docx default", user="U1")
+        assert "for everyone by default" in reply
+        assert effective(settings, "U2").note_format == "docx"
+        assert effective(settings).note_format == "docx"
+
+    def test_toggle_is_per_user(self, tmp_path):
+        from scribe.runtime_config import effective
+
+        settings, h = self._handlers(tmp_path)
+        self._call(h["/scribetoggletts"], "off", user="U1")
+        assert effective(settings, "U1").tts_enabled is False
+        assert effective(settings, "U2").tts_enabled is True
+
+    def test_voice_is_per_user_and_warns_when_diverging(self, tmp_path, monkeypatch):
+        from scribe import slack_app
+        from scribe.runtime_config import effective
+
+        monkeypatch.setattr(slack_app, "voices", lambda s: ["af_bella", "bm_george"])
+        settings, h = self._handlers(tmp_path)
+        reply = self._call(h["/scribevoice"], "bm_george", user="U1")
+        assert "for you" in reply and "stays loaded" in reply
+        assert effective(settings, "U1").tts_voice == "bm_george"
+        assert effective(settings, "U2").tts_voice == "af_bella"
+        # Setting the shared default carries no divergence warning.
+        assert "stays loaded" not in self._call(h["/scribevoice"], "bm_george default")
+
+    def test_config_shows_own_and_shared(self, tmp_path):
+        _, h = self._handlers(tmp_path)
+        assert "shared defaults" in self._call(h["/scribeconfig"], "").lower()
+        self._call(h["/scribeformat"], "none", user="U1")
+        reply = self._call(h["/scribeconfig"], "", user="U1")
+        assert "Your settings" in reply and "note *none*" in reply
+        assert "Shared defaults" in reply and "note *pdf*" in reply
+        assert "overridden: note_format" in reply
+
+    def test_process_resolves_settings_for_the_sender(self, tmp_path, monkeypatch):
+        """The whole point: a job runs under its SENDER's layer, not whoever typed last."""
+        from scribe import slack_app
+        from scribe.config import Settings
+        from scribe.queue import Job
+        from scribe.runtime_config import set_value
+
+        settings = Settings(slack_bot_token="xoxb-x", slack_app_token="xapp-x",
+                            spool_dir=str(tmp_path / "q"), tts_enabled=False)
+        set_value(settings, "note_format", "md", user="U1")
+        seen = {}
+
+        def fake_extract(s, target, cache=None):
+            from scribe.document import Document, Method, Page
+            return Document(source="d", kind="link", title="d",
+                            pages=[Page(number=1, text="hi", method=Method.TEXT_LAYER)])
+
+        def fake_summarize(s, doc, abort=None):
+            from scribe.summarize import Summary
+            return Summary(title="t", tldr="x", summary="y")
+
+        def fake_export(body, fmt, *, stem, out_dir):
+            seen["fmt"] = fmt
+            p = out_dir / f"{stem}.{fmt}"
+            p.write_text("x")
+            return p
+
+        monkeypatch.setattr(slack_app, "extract", fake_extract)
+        monkeypatch.setattr(slack_app, "summarize", fake_summarize)
+        monkeypatch.setattr(slack_app, "export_note", fake_export)
+
+        class Client:
+            def chat_postMessage(self, **kw): pass
+            def files_upload_v2(self, **kw): pass
+
+        job = Job.new("C", "1", "https://x", "x")
+        job.user = "U1"
+        slack_app._process(settings, Client(), job)
+        assert seen["fmt"] == "md"
+        job2 = Job.new("C", "2", "https://x", "x")
+        job2.user = "U2"
+        slack_app._process(settings, Client(), job2)
+        assert seen["fmt"] == "pdf"
