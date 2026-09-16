@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -125,29 +127,6 @@ class Settings(BaseSettings):
     timezone: str = "America/Denver"
     eta_single_seconds_per_char: float = 0.02
 
-    # --- Obsidian vault publishing -------------------------------------------------
-    # mekadmin/mekvault. The vault syncs to Obsidian over iCloud with Obsidian Git as
-    # version control; the cluster cannot write iCloud, so scribe commits here and the
-    # plugin pulls. Needs a project access token with write_repository.
-    gitlab_url: str = "https://gitlab.meklab.net"
-    vault_project_id: int = 2
-    vault_branch: str = "main"
-    gitlab_token: str = ""
-
-    # The vault's own convention: new notes land in the `+/` inbox for later sorting
-    # (see the vault's CLAUDE.md). The `aigen` tag preserves the AI-generated marker.
-    vault_notes_dir: str = "+"
-    vault_files_dir: str = "Misc/Files"
-
-    # Obsidian vault NAME as it appears in the app (the iCloud folder is
-    # .../iCloud~md~obsidian/Documents/MekVault). Used to build obsidian:// deep links so
-    # a Slack reply opens the note directly on phone or laptop.
-    obsidian_vault_name: str = "MekVault"
-
-    # The vault repo syncs to every device, so a large binary is a lasting cost. Above
-    # this, the source file is skipped and the note simply has no attachment link.
-    max_attachment_bytes: int = 10 * 1024 * 1024
-
     # --- TTS / Audiobookshelf (home#174) --------------------------------------------
     # Kokoro (kokoro-tts in this same namespace) turns the note into an m4b that lands
     # in Audiobookshelf's Articles library and back in the Slack thread. Best-effort by
@@ -155,9 +134,11 @@ class Settings(BaseSettings):
     # fail or requeue a job.
     tts_enabled: bool = True
 
-    # Whether jobs publish a note to the Obsidian vault. Both this and tts_enabled are
-    # runtime-toggleable from Slack (see runtime_config); env sets the default.
-    vault_enabled: bool = True
+    # How the full note is delivered in the Slack thread (scribe#5): a file in this
+    # format, or "none" for the TL;DR reply alone. `md` is the raw note, frontmatter and
+    # all, so it drops straight into an Obsidian vault; `pdf`/`docx` are for people who
+    # will never open a markdown file. Runtime-toggleable from Slack like tts_enabled.
+    note_format: Literal["pdf", "md", "docx", "none"] = "pdf"
 
     # ClusterIP-only, same reasoning as ollama: kokoro-fastapi ships no authentication.
     # Laptop testing: kubectl -n infra port-forward svc/kokoro-tts 8880

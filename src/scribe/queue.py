@@ -34,7 +34,7 @@ class Job:
     source_label: str
     attachment: str | None = None
     # The ORIGINAL upload name. The spooled file is prefixed with the job id to keep
-    # concurrent uploads from colliding on disk, but the vault must get the clean name --
+    # concurrent uploads from colliding on disk, but the note must get the clean name --
     # otherwise notes link attachments called "1787099069943412312-1cc31a4e-Syllabus.pdf".
     attachment_name: str | None = None
     # Slack user id of the sender, for rendering ETAs in THEIR profile timezone on the

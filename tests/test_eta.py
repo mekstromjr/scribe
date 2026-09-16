@@ -11,13 +11,13 @@ import pypdfium2 as pdfium
 from scribe.config import Settings
 from scribe.eta import _budget_chars, _model_seconds, estimate_seconds, eta_line
 
-SETTINGS = Settings(slack_bot_token="", slack_app_token="", gitlab_token="")
+SETTINGS = Settings(slack_bot_token="", slack_app_token="")
 
 # The deployment overrides context_tokens down to 14000 (insp1's 16k window minus the
 # 4-chars/token overshoot margin — see k8s apps/scribe). The chunk-math tests use the
 # same shape so they exercise the map-reduce branch the way production reaches it.
 DEPLOYED = Settings(
-    slack_bot_token="", slack_app_token="", gitlab_token="", context_tokens=14000
+    slack_bot_token="", slack_app_token="", context_tokens=14000
 )
 
 
