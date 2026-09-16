@@ -4,15 +4,16 @@
 > mirrored to GitHub for visibility. Issues and pull requests are not accepted here;
 > the mirror is overwritten on every push. Contact: see the profile of [@mekstromjr](https://github.com/mekstromjr).
 
-Send a link, PDF, or image to Slack; get a brief summary back in thread and a full note in
-the Obsidian vault with a thorough summary plus the complete extracted text.
+Send a link, PDF, or image to Slack; get a brief summary back in thread, followed by the
+full note as a file (PDF by default, or Markdown, Word, or nothing) with a thorough summary
+plus the complete extracted text.
 
 Backed by [`ollama-mini`](https://gitlab.meklab.net/meklab/k8s/-/tree/main/apps/ollama-mini)
 (CPU-only Ollama in the `infra` namespace).
 
 **Status: Phase 4 — Slack Socket Mode bot written, not yet verified against live Slack**
 (needs the app tokens; see [SLACK_SETUP.md](SLACK_SETUP.md)). Everything below Slack —
-extraction, summarization, note rendering, vault publishing — is working and verified.
+extraction, summarization, note rendering, note export — is working and verified.
 
 ## The core design decision: extract before OCR
 
@@ -49,13 +50,13 @@ scribe extract deck.pdf --per-page
 scribe extract https://example.com/article
 scribe extract scan.png
 
-# Extract + summarize + render the vault note (prints it)
+# Extract + summarize + render the note markdown (prints it)
 scribe note deck.pdf
 scribe note https://example.com/article --out-dir ~/notes
 
-# ...and commit it to the Obsidian vault
-scribe publish deck.pdf
-scribe publish https://example.com/article
+# ...or write it as a file, the way the bot posts it (pdf | md | docx)
+scribe export --format pdf deck.pdf
+scribe export --format docx https://example.com/article --out-dir ~/Downloads
 
 # Run the Slack bot (blocks; needs the two Slack tokens)
 scribe serve
@@ -117,33 +118,22 @@ the models it serves, and fails if the expected models are missing.
   Wikimedia's robot policy asks automated clients to declare themselves; complying works
   better than evading.
 
-## Vault publishing
+## Note delivery
 
-Notes are committed to `mekadmin/mekvault` (project 2) at `+/`, the vault's own inbox
-convention for new unsorted notes. Local PDFs and images travel with the note into
-`Misc/Files/` and are wikilinked; links do not, since the URL is already in the
-frontmatter.
+The full note is posted into the Slack thread as a file, right after the TL;DR reply, in
+whatever format `/scribeformat` selects (`pdf` by default; `md`, `docx`, or `none`).
+Nothing is written anywhere else: a note worth keeping is downloaded and filed by hand,
+so several people can use one bot without filling anyone's vault.
 
-Three deliberate choices:
-
-- **One commit, not two.** The note and its attachment go up together via the commits
-  API. Two separate file-API calls could leave the vault with a note whose wikilink
-  points at a file that never committed — a dangling link in a repo that syncs to every
-  device.
-- **The attachment path resolves *before* rendering.** The note has to link the
-  attachment, but its final path is only known after collision resolution. Rendering
-  first would mean guessing the name.
-- **`unique_path` never overwrites.** A second note about the same source is a new note;
-  silently replacing one you may have edited since is data loss. Collisions append
-  ` (2)`, ` (3)`, and give up after 99 rather than looping.
-
-Needs `SCRIBE_GITLAB_TOKEN` — a project access token on the vault with
-`write_repository`. The vault syncs to Obsidian over iCloud with Obsidian Git as version
-control; the cluster cannot write iCloud, so scribe commits and the plugin pulls.
-
-**If notes stop appearing, check that Obsidian Git can still push.** It commits locally
-first, so a broken remote leaves the repo looking healthy while the server silently falls
-behind — that failure went unnoticed for three months.
+- **`md` is the renderer's output verbatim**, frontmatter, tags and Obsidian callout
+  included, so it drops into a vault unchanged.
+- **`pdf` and `docx` are renderings of that same markdown** with the Obsidian-only
+  syntax made portable: the frontmatter block goes, the collapsed callout becomes a
+  plain blockquote with a bold lead. pandoc produces the docx directly and the HTML for
+  the PDF; weasyprint lays the PDF out. No TeX in the image.
+- **Export is best-effort, like audio.** By the time it runs the summary is already in
+  the thread, so a pandoc or upload failure costs the file and posts a one-line apology;
+  it never fails or requeues the job.
 
 ## Slack
 
@@ -199,11 +189,7 @@ All settings are env-overridable with the `SCRIBE_` prefix (see `src/scribe/conf
 | `SCRIBE_MAX_OCR_PAGES` | `0` (unlimited) | Skipped pages are recorded, not silently dropped |
 | `SCRIBE_OCR_NUM_PREDICT` | `3000` | Generation cap per OCR page; hitting it skips the page (runaway guard) |
 | `SCRIBE_OCR_TIMEOUT_SECONDS` | `900` | Per-page OCR deadline, separate from the summarization timeout; must exceed cap / slowest tok/s |
-| `SCRIBE_GITLAB_TOKEN` | *(none)* | Project access token, `write_repository` on the vault |
-| `SCRIBE_VAULT_PROJECT_ID` | `2` | `mekadmin/mekvault` |
-| `SCRIBE_VAULT_NOTES_DIR` | `+` | The vault's inbox convention |
-| `SCRIBE_VAULT_FILES_DIR` | `Misc/Files` | Where attachments land |
-| `SCRIBE_MAX_ATTACHMENT_BYTES` | `10485760` | Above this the note publishes without the source |
+| `SCRIBE_NOTE_FORMAT` | `pdf` | How the full note is delivered in-thread: `pdf`, `md`, `docx`, `none`; `/scribeformat` overrides at runtime |
 | `SCRIBE_SLACK_BOT_TOKEN` | *(none)* | `xoxb-` from installing the app |
 | `SCRIBE_SLACK_APP_TOKEN` | *(none)* | `xapp-` with `connections:write`, for Socket Mode |
 

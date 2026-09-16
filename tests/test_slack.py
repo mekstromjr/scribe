@@ -66,7 +66,7 @@ class TestHelpGating:
     def test_help_text_explains_the_inputs(self):
         from scribe.slack_app import HELP_TEXT
 
-        for expected in ("link", "PDF", "image", "Obsidian"):
+        for expected in ("link", "PDF", "image", "scribeformat"):
             assert expected in HELP_TEXT
 
 
@@ -77,11 +77,17 @@ class TestRetryClassification:
 
     def test_transient_errors_are_retried(self):
         from scribe.ollama import OllamaError
-        from scribe.vault import VaultError
 
-        # Both mean "a dependency was unreachable", not "this input is bad".
-        for exc in (OllamaError, VaultError):
-            assert issubclass(exc, RuntimeError)
+        # "A dependency was unreachable", not "this input is bad".
+        assert issubclass(OllamaError, RuntimeError)
+
+    def test_export_errors_are_not_transient(self):
+        """A note export failure happens after the TL;DR is posted; it must degrade to a
+        missing file, never requeue a job whose summary already exists."""
+        from scribe.note_export import ExportError
+        from scribe.ollama import OllamaError
+
+        assert not issubclass(ExportError, OllamaError)
 
     def test_extraction_errors_are_not_retried(self):
         """A dead link or unsupported file will fail identically forever; retrying it
@@ -254,3 +260,60 @@ class TestUserTz:
         job.user = "U0MICHAEL"
         enqueue(settings, job)
         assert restore(settings)[0].user == "U0MICHAEL"
+
+
+class TestScribeFormatCommand:
+    """`/scribeformat` replaced the vault on/off toggle (scribe#5): the choice is which
+    file the reader gets, not whether the owner's vault fills up."""
+
+    def _app(self, tmp_path, monkeypatch):
+        from scribe import slack_app
+        from scribe.config import Settings
+
+        settings = Settings(slack_bot_token="xoxb-x", slack_app_token="xapp-x",
+                            spool_dir=str(tmp_path / "q"))
+        handlers: dict = {}
+
+        class FakeApp:
+            def command(self, name):
+                def deco(fn):
+                    handlers[name] = fn
+                    return fn
+                return deco
+
+        slack_app._register_config_commands(FakeApp(), settings)
+        return settings, handlers
+
+    def _call(self, handler, text):
+        out = []
+        handler(ack=lambda: None, respond=out.append, command={"text": text})
+        return out[-1]
+
+    def test_bare_invocation_reports_current(self, tmp_path, monkeypatch):
+        _, h = self._app(tmp_path, monkeypatch)
+        assert "*pdf*" in self._call(h["/scribeformat"], "")
+
+    def test_sets_and_persists(self, tmp_path, monkeypatch):
+        from scribe.runtime_config import effective
+
+        settings, h = self._app(tmp_path, monkeypatch)
+        reply = self._call(h["/scribeformat"], "MD")
+        assert "*md*" in reply
+        assert effective(settings).note_format == "md"
+
+    def test_rejects_unknown_format(self, tmp_path, monkeypatch):
+        from scribe.runtime_config import effective
+
+        settings, h = self._app(tmp_path, monkeypatch)
+        reply = self._call(h["/scribeformat"], "html")
+        assert "not a note format" in reply
+        assert effective(settings).note_format == "pdf"
+
+    def test_none_plus_tts_off_warns(self, tmp_path, monkeypatch):
+        settings, h = self._app(tmp_path, monkeypatch)
+        self._call(h["/scribetoggletts"], "off")
+        assert "Both outputs are off" in self._call(h["/scribeformat"], "none")
+
+    def test_old_vault_toggle_is_gone(self, tmp_path, monkeypatch):
+        _, h = self._app(tmp_path, monkeypatch)
+        assert "/scribetoggleobs" not in h
