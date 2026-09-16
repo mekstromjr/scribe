@@ -126,6 +126,10 @@ class Settings(BaseSettings):
     # server-side rendering at all.
     timezone: str = "America/Denver"
     eta_single_seconds_per_char: float = 0.02
+    # Audio: production Kokoro measured 2026-09-14 at ~100 s per 3000-char segment.
+    # All eta_* values are PRIORS: calibration.py learns a per-stage correction from
+    # every clean completion (scribe#8), so these only matter on a fresh spool.
+    eta_audio_seconds_per_char: float = 1 / 30
 
     # --- TTS / Audiobookshelf (home#174) --------------------------------------------
     # Kokoro (kokoro-tts in this same namespace) turns the note into an m4b that lands

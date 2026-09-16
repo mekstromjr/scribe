@@ -36,6 +36,9 @@ ALLOWED_KEYS = {"tts_voice", "tts_enabled", "note_format"}
 # Reserved top-level key holding the per-user map. Not an allowed setting name, so it can
 # never collide with one.
 USERS_KEY = "users"
+# Other reserved sections the bot writes for itself (e.g. "calibration", scribe#8).
+# Read and written whole via load_section/save_section; never surfaced as settings.
+RESERVED_KEYS = {USERS_KEY, "calibration"}
 
 
 def config_path(settings: Settings) -> Path:
@@ -95,6 +98,10 @@ def set_value(settings: Settings, key: str, value: Any, user: str | None = None)
         if not isinstance(users, dict):
             users = data[USERS_KEY] = {}
         users.setdefault(user, {})[key] = value
+    _write_atomic(path, data)
+
+
+def _write_atomic(path: Path, data: dict[str, Any]) -> None:
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".config-", suffix=".json")
     try:
         with os.fdopen(fd, "w") as fh:
@@ -103,6 +110,25 @@ def set_value(settings: Settings, key: str, value: Any, user: str | None = None)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
+
+
+def load_section(settings: Settings, name: str) -> dict[str, Any]:
+    """A reserved, non-settings section of the file (whole), or {}."""
+    if name not in RESERVED_KEYS:
+        raise ValueError(f"{name} is not a reserved section")
+    data = _read(settings).get(name)
+    return dict(data) if isinstance(data, dict) else {}
+
+
+def save_section(settings: Settings, name: str, value: dict[str, Any]) -> None:
+    """Replace a reserved section atomically, leaving every other key alone."""
+    if name not in RESERVED_KEYS:
+        raise ValueError(f"{name} is not a reserved section")
+    path = config_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = _read(settings)
+    data[name] = value
+    _write_atomic(path, data)
 
 
 def effective(settings: Settings, user: str | None = None) -> Settings:

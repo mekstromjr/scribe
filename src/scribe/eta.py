@@ -16,6 +16,7 @@ constant, which is right for nearly every article.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -40,11 +41,65 @@ def _budget_chars(settings: Settings) -> int:
 
 def _model_seconds(settings: Settings, chars: int) -> float:
     """Cost of the summarize step alone for an extracted text of ``chars``."""
+    return _summarize(settings, chars)[1]
+
+
+def _summarize(settings: Settings, chars: int) -> tuple[str, float]:
+    """(branch, raw seconds) for the summarize stage. The branch names the calibration
+    stage: single-call and map-reduce drift independently."""
     if chars <= _budget_chars(settings):
-        return settings.eta_single_base_seconds + chars * settings.eta_single_seconds_per_char
+        return ("summarize_single",
+                settings.eta_single_base_seconds + chars * settings.eta_single_seconds_per_char)
     chunks = math.ceil(chars / settings.chunk_chars)
     # +1 is the reduce call, which is a chunk-sized request in its own right.
-    return (chunks + 1) * settings.eta_chunk_seconds
+    return "summarize_map", (chunks + 1) * settings.eta_chunk_seconds
+
+
+@dataclass
+class Estimate:
+    """Raw (uncalibrated) per-stage predictions for one job, plus the features they came
+    from. Calibration scales each stage; the raw numbers are what get learned against."""
+    kind: str
+    chars: int
+    ocr_pages: int
+    branch: str            # summarize_single | summarize_map
+    ocr_seconds: float     # raw
+    summarize_seconds: float  # raw
+    audio_seconds: float   # raw, from chars at ack time; exact at hand-off
+
+    @property
+    def summary_raw(self) -> float:
+        return self.ocr_seconds + self.summarize_seconds
+
+
+def estimate(settings: Settings, target: str) -> Estimate:
+    """Per-stage estimate for one job, excluding queue wait. Never raises: an unreadable
+    file is the pipeline's error to report, not the ack's."""
+    budget = _budget_chars(settings)
+    try:
+        if target.startswith(("http://", "https://")):
+            chars, ocr_pages, kind = budget, 0, "link"
+        else:
+            path = Path(target).expanduser()
+            if path.suffix.lower() in IMAGE_SUFFIXES:
+                chars, ocr_pages, kind = _OCR_CHARS_PER_PAGE, 1, "image"
+            else:
+                text_chars, ocr_pages = _scan_pdf(settings, path)
+                chars, kind = text_chars + ocr_pages * _OCR_CHARS_PER_PAGE, "pdf"
+    except Exception:
+        chars, ocr_pages, kind = budget, 0, "unknown"
+    branch, summ = _summarize(settings, chars)
+    return Estimate(
+        kind=kind, chars=chars, ocr_pages=ocr_pages, branch=branch,
+        ocr_seconds=ocr_pages * settings.eta_ocr_page_seconds,
+        summarize_seconds=summ,
+        audio_seconds=audio_seconds(settings, chars),
+    )
+
+
+def audio_seconds(settings: Settings, script_chars: int) -> float:
+    """Raw audio-stage cost for a listening script of ``script_chars``."""
+    return script_chars * settings.eta_audio_seconds_per_char
 
 
 def _scan_pdf(settings: Settings, path: Path) -> tuple[int, int]:
@@ -71,28 +126,21 @@ def _scan_pdf(settings: Settings, path: Path) -> tuple[int, int]:
 
 
 def estimate_seconds(settings: Settings, target: str) -> int:
-    """Estimated processing seconds for one job, excluding queue wait.
+    """Raw summary-stage seconds (extract + summarize), excluding queue wait and audio.
+    Kept for callers that want one number; the ack uses estimate() + calibration."""
+    return round(estimate(settings, target).summary_raw)
 
-    Never raises: an unreadable file is the pipeline's error to report, not the ack's —
-    fall back to the single-call constant rather than blocking the acknowledgement.
-    """
+
+def clock_at(settings: Settings, seconds_from_now: float, tz: str | None = None) -> str:
+    """'HH:MM' (+ ' tomorrow' when the date rolls) in the viewer's zone."""
     try:
-        if target.startswith(("http://", "https://")):
-            chars = _budget_chars(settings)  # size unknown; assume a budget-full article
-            return round(_model_seconds(settings, chars))
-
-        path = Path(target).expanduser()
-        if path.suffix.lower() in IMAGE_SUFFIXES:
-            return round(
-                settings.eta_ocr_page_seconds
-                + _model_seconds(settings, _OCR_CHARS_PER_PAGE)
-            )
-
-        chars, ocr_pages = _scan_pdf(settings, path)
-        chars += ocr_pages * _OCR_CHARS_PER_PAGE
-        return round(ocr_pages * settings.eta_ocr_page_seconds + _model_seconds(settings, chars))
-    except Exception:
-        return round(_model_seconds(settings, _budget_chars(settings)))
+        zone = ZoneInfo(tz) if tz else ZoneInfo(settings.timezone)
+    except KeyError:
+        zone = ZoneInfo(settings.timezone)
+    now = datetime.now(tz=zone)
+    done = now + timedelta(seconds=seconds_from_now)
+    day = " tomorrow" if done.date() != now.date() else ""
+    return f"{done:%H:%M}{day}"
 
 
 def eta_line(settings: Settings, total_seconds: float, tz: str | None = None) -> str:
@@ -106,11 +154,4 @@ def eta_line(settings: Settings, total_seconds: float, tz: str | None = None) ->
     different calendar day says so, or "23:58" quoted at 23:50 would read as fourteen
     hours away.
     """
-    try:
-        zone = ZoneInfo(tz) if tz else ZoneInfo(settings.timezone)
-    except KeyError:
-        zone = ZoneInfo(settings.timezone)
-    now = datetime.now(tz=zone)
-    done = now + timedelta(seconds=total_seconds)
-    day = " tomorrow" if done.date() != now.date() else ""
-    return f"Estimated completion: {done:%H:%M}{day}."
+    return f"Estimated completion: {clock_at(settings, total_seconds, tz)}."
