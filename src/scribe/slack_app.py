@@ -26,10 +26,12 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from scribe.abs import ABSError, upload
 from scribe.audio import produce_audio
+from scribe.calibration import Calibration
 from scribe.config import Settings, load_settings
-from scribe.document import Document
-from scribe.eta import estimate_seconds, eta_line
+from scribe.document import Document, Method
+from scribe.eta import Estimate, audio_seconds, clock_at, estimate
 from scribe.extract import ExtractionError, extract
+from scribe.listening import build_script
 from scribe.note import note_title, render, slugify
 from scribe.note_export import FORMATS, ExportError, export_note
 from scribe.ollama import OllamaError
@@ -190,7 +192,7 @@ def download_file(settings: Settings, file_info: dict, dest: Path) -> Path:
 
 
 def _audio_stage(settings: Settings, client, job, doc, summary,
-                 abort=lambda: None) -> None:
+                 abort=lambda: None) -> float | None:
     """Synthesize, upload to Audiobookshelf, and post the m4b in-thread.
 
     Never raises. Each delivery step degrades independently: an ABS outage still posts
@@ -201,6 +203,7 @@ def _audio_stage(settings: Settings, client, job, doc, summary,
     """
     title = note_title(doc, summary)
     author = doc.source if doc.kind == "link" else "scribe"
+    t0 = time.monotonic()
     try:
         result = produce_audio(settings, doc, summary, title=title, author=author, abort=abort)
     except JobCanceled:
@@ -212,7 +215,8 @@ def _audio_stage(settings: Settings, client, job, doc, summary,
             thread_ts=job.thread_ts,
             text=f"_(No audio this time — synthesis failed: {exc})_",
         )
-        return
+        return None
+    synth_wall = time.monotonic() - t0
 
     with result.workdir:
         minutes = result.audio_seconds / 60
@@ -241,6 +245,7 @@ def _audio_stage(settings: Settings, client, job, doc, summary,
                 channel=job.channel, thread_ts=job.thread_ts,
                 text=abs_line or f"_(Audio ready but both deliveries failed: {exc})_",
             )
+    return synth_wall
 
 
 def _note_stage(settings: Settings, client, job: Job, doc, summary) -> None:
@@ -282,7 +287,8 @@ def _note_stage(settings: Settings, client, job: Job, doc, summary) -> None:
 
 
 def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
-             active: _Active | None = None, audio_submit=lambda _aj: None) -> None:
+             active: _Active | None = None, audio_submit=lambda _aj: None,
+             audio_ahead=lambda: 0.0, tz: str | None = None) -> None:
     """Run the summarize half of the pipeline and reply in-thread. Never raises —
     failures are reported to Slack.
 
@@ -296,6 +302,10 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
     # SENDER (scribe#6): each person gets their own voice and format automatically.
     settings = effective(settings, job.user)
     requeued = False
+    # The raw per-stage predictions this job was quoted from (a PDF scan is
+    # milliseconds), so each stage's actual can be learned against them (scribe#8).
+    pred = estimate(settings, job.target)
+    cal = Calibration.load(settings)
 
     def abort() -> None:
         # The one user-visible cancel message was already posted by the cancel command;
@@ -307,7 +317,19 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
         abort()
         # The page cache lives in the spool under the job id, so a requeued attempt
         # resumes OCR at the first unfinished page instead of redoing them all (scribe#4).
+        t0 = time.monotonic()
         doc = extract(settings, job.target, cache=page_cache(settings, job.id))
+        extract_wall = time.monotonic() - t0
+        # OCR is the only extraction cost worth learning; a text-layer read is ms. Only
+        # a run that OCR'd every page it meant to (no cap, no skips, no cache resume)
+        # is a clean sample.
+        ocr_pages = [pg for pg in doc.pages if pg.method is Method.OCR]
+        if pred.ocr_pages and ocr_pages and job.attempts == 0 and not any(
+            pg.method is Method.SKIPPED for pg in doc.pages
+        ):
+            log.info("eta.actual job=%s stage=ocr predicted=%.0f actual=%.0f pages=%d",
+                     job.id, pred.ocr_seconds, extract_wall, len(ocr_pages))
+            cal.observe(settings, "ocr", pred.ocr_seconds, extract_wall)
         if job.attachment_name:
             # The extractors derive `source` from the file PATH, which for an upload is
             # the SPOOLED name carrying a job-id prefix (kept so concurrent uploads cannot
@@ -315,7 +337,27 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
             # via the filename fallback, the title. `title` is NOT set from the name: the
             # ladder in note_title prefers PDF metadata, then the model (scribe#9).
             doc.source = job.attachment_name
+        t0 = time.monotonic()
         summary = summarize(settings, doc, abort=abort)
+        summarize_wall = time.monotonic() - t0
+        if job.attempts == 0:
+            log.info("eta.actual job=%s stage=%s predicted=%.0f actual=%.0f chars=%d",
+                     job.id, pred.branch, pred.summarize_seconds, summarize_wall,
+                     len(doc.text))
+            cal.observe(settings, pred.branch, pred.summarize_seconds, summarize_wall)
+
+        # Exact audio prediction now that the listening script can be built (rule-based,
+        # cheap): quoted in the TL;DR reply and learned against by the audio worker.
+        audio_on = settings.tts_enabled and bool(settings.abs_token)
+        script_chars = 0
+        audio_raw = 0.0
+        if audio_on:
+            try:
+                script_chars = sum(len(seg) for ch in build_script(
+                    doc, summary, max_chars=settings.tts_max_chars) for seg in ch.segments)
+            except Exception:  # never let a script problem block the note
+                script_chars = len(doc.text) + len(summary.summary)
+            audio_raw = audio_seconds(settings, script_chars)
 
         # Past here the TL;DR is posted and cancel would confuse more than it saves.
         abort()
@@ -332,6 +374,9 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
         ]
         if settings.note_format == "none":
             lines.append("_Note delivery is off (`/scribeformat`) — this summary lives only here._")
+        if audio_on and not (active and active.canceled(job.id)):
+            wait = cal.quote("audio", audio_raw) + audio_ahead()
+            lines.append(f"_Audio should land by {clock_at(settings, wait, tz)}._")
         if summary.sections > 1:
             lines.append(
                 f"_Long document — summarized in {summary.sections} sections, so this "
@@ -362,6 +407,7 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
                     # The sender's resolved TTS settings, frozen at hand-off.
                     overrides={"tts_voice": settings.tts_voice,
                                "tts_enabled": settings.tts_enabled},
+                    script_chars=script_chars, predicted_raw=audio_raw,
                 )
                 enqueue_audio(settings, audio_job)
                 audio_submit(audio_job)
@@ -433,7 +479,11 @@ def _process_audio(settings: Settings, client, job: AudioJob,
         abort()
         doc = Document.model_validate(job.doc)
         summary = Summary.model_validate(job.summary)
-        _audio_stage(settings, client, job, doc, summary, abort=abort)
+        synth_wall = _audio_stage(settings, client, job, doc, summary, abort=abort)
+        if synth_wall and job.predicted_raw > 0:
+            log.info("eta.actual job=%s stage=audio predicted=%.0f actual=%.0f script_chars=%d",
+                     job.id, job.predicted_raw, synth_wall, job.script_chars)
+            Calibration.load(settings).observe(settings, "audio", job.predicted_raw, synth_wall)
     except JobCanceled:
         log.info("audio for %s canceled by its thread", job.id)
     except Exception:
@@ -447,42 +497,69 @@ class _Pending:
     document will be done, not when it will merely start.
 
     Tracked explicitly rather than reading ThreadPoolExecutor._work_queue, which is a
-    private attribute with no stability guarantee. The seconds figure deliberately counts
-    an in-flight job at its full estimate: tracking its remaining time would need worker
-    progress plumbing, and overshooting a queue-wait estimate is the cheap direction to
-    be wrong in.
+    private attribute with no stability guarantee. The in-flight job counts at its
+    REMAINING time (estimate minus elapsed, floored at zero), not its full estimate:
+    quoting a half-finished job at full price was one reason acks ran late (scribe#8).
     """
 
     def __init__(self) -> None:
         self._n = 0
-        self._seconds = 0.0
+        self._queued_seconds = 0.0
+        self._inflight: tuple[float, float] | None = None  # (est, started_at)
         self._lock = threading.Lock()
+
+    def _ahead_locked(self) -> tuple[int, float]:
+        remaining = 0.0
+        if self._inflight:
+            est, started = self._inflight
+            remaining = max(0.0, est - (time.monotonic() - started))
+        return self._n, self._queued_seconds + remaining
+
+    def peek(self) -> tuple[int, float]:
+        """(jobs ahead, seconds ahead) without adding anything."""
+        with self._lock:
+            return self._ahead_locked()
 
     def add(self, est_seconds: float) -> tuple[int, float]:
         """Returns (jobs ahead, estimated seconds ahead) as of just before this add."""
         with self._lock:
-            ahead = (self._n, self._seconds)
+            ahead = self._ahead_locked()
             self._n += 1
-            self._seconds += est_seconds
+            self._queued_seconds += est_seconds
         return ahead
+
+    def start(self, est_seconds: float) -> None:
+        """A queued job began running: it moves from the queued sum to in-flight."""
+        with self._lock:
+            self._queued_seconds = max(0.0, self._queued_seconds - est_seconds)
+            self._inflight = (est_seconds, time.monotonic())
 
     def done(self, est_seconds: float) -> None:
         with self._lock:
             self._n = max(0, self._n - 1)
-            self._seconds = max(0.0, self._seconds - est_seconds)
+            if self._inflight is not None:
+                self._inflight = None
+            else:
+                self._queued_seconds = max(0.0, self._queued_seconds - est_seconds)
 
 
 def _submit(settings: Settings, pool: ThreadPoolExecutor, pending: _Pending,
             active: _Active, client, job: Job, est_seconds: float,
-            audio_submit=lambda _aj: None) -> None:
+            audio_submit=lambda _aj: None, audio_ahead=lambda: 0.0,
+            tz: str | None = None) -> None:
     def requeue(j: Job) -> None:
         # Back of the queue, not the front: a document whose dependency is down should not
         # block everything behind it while it retries.
         pending.add(est_seconds)
-        _submit(settings, pool, pending, active, client, j, est_seconds, audio_submit)
+        _submit(settings, pool, pending, active, client, j, est_seconds, audio_submit,
+                audio_ahead, tz)
+
+    def run() -> None:
+        pending.start(est_seconds)
+        _process(settings, client, job, requeue, active, audio_submit, audio_ahead, tz)
 
     active.add(job)
-    fut = pool.submit(_process, settings, client, job, requeue, active, audio_submit)
+    fut = pool.submit(run)
 
     def _done(_f) -> None:
         pending.done(est_seconds)
@@ -495,11 +572,15 @@ def _submit_audio(settings: Settings, pool: ThreadPoolExecutor, pending: _Pendin
                   active: _Active, client, job: AudioJob) -> None:
     """Schedule an audio job on the audio worker. Registered under the same id as its
     summarize half, so a thread cancel finds it whether it is waiting or synthesizing."""
-    # Queue-wait accounting per stage; the audio ETA itself is scribe#8's job.
-    est = _audio_estimate_seconds(job)
+    est = Calibration.load(settings).expected("audio", job.predicted_raw)
     pending.add(est)
     active.add(job)
-    fut = pool.submit(_process_audio, settings, client, job, active)
+
+    def run() -> None:
+        pending.start(est)
+        _process_audio(settings, client, job, active)
+
+    fut = pool.submit(run)
 
     def _done(_f) -> None:
         pending.done(est)
@@ -508,13 +589,23 @@ def _submit_audio(settings: Settings, pool: ThreadPoolExecutor, pending: _Pendin
     fut.add_done_callback(_done)
 
 
-def _audio_estimate_seconds(job: AudioJob) -> float:
-    """Rough audio-stage cost for queue-wait accounting: measured 2026-09-14 at ~100 s
-    per 3000-char segment on production Kokoro. Refit belongs to scribe#8."""
-    chars = len(job.summary.get("summary", "")) + sum(
-        len(p.get("text", "")) for p in job.doc.get("pages", [])
-    )
-    return chars / 30.0
+def _ack_text(settings: Settings, est: Estimate, cal: Calibration, ahead_seconds: float,
+              audio_ahead: float, *, tz: str | None, audio_on: bool) -> tuple[str, float, float]:
+    """The two-line quote for the ack: summary time, then audio time (scribe#8).
+
+    Each stage is scaled by its learned factor at the quoting (upper) side. Audio starts
+    when the summary is done OR when the audio queue drains, whichever is later, then
+    takes its own quoted time. Returns (text, quoted_summary_seconds, quoted_audio_seconds).
+    """
+    summary_q = cal.quote("ocr", est.ocr_seconds) + cal.quote(est.branch, est.summarize_seconds)
+    summary_at = ahead_seconds + summary_q
+    text = f"Summary by {clock_at(settings, summary_at, tz)}"
+    audio_q = 0.0
+    if audio_on:
+        audio_q = cal.quote("audio", est.audio_seconds)
+        audio_at = max(summary_at, audio_ahead) + audio_q
+        text += f", audio by {clock_at(settings, audio_at, tz)}"
+    return text + ".", summary_q, audio_q
 
 
 def _register_config_commands(app: App, settings: Settings) -> None:
@@ -640,6 +731,7 @@ def _register_config_commands(app: App, settings: Settings) -> None:
         else:
             lines.append("_You are on the shared defaults. Any command you run changes "
                          "only your settings; add `default` to change everyone's._")
+        lines.append(f"_Estimator calibration: {Calibration.load(settings).describe()}_")
         respond("\n".join(lines))
 
 
@@ -663,6 +755,29 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
 
     def audio_submit(aj: AudioJob) -> None:
         _submit_audio(settings, audio_pool, audio_pending, active, app.client, aj)
+
+    def audio_ahead() -> float:
+        return audio_pending.peek()[1]
+
+    def quote(job: Job, tz: str | None) -> tuple[str, float]:
+        """Ack text and the summary-stage seconds to book in the queue."""
+        est = estimate(settings, job.target)
+        cal = Calibration.load(settings)
+        eff = effective(settings, job.user)
+        audio_on = eff.tts_enabled and bool(eff.abs_token)
+        ahead_n, ahead_seconds = pending.peek()
+        text, summary_q, audio_q = _ack_text(
+            settings, est, cal, ahead_seconds, audio_ahead(), tz=tz, audio_on=audio_on)
+        log.info(
+            "eta.ack job=%s kind=%s chars=%d ocr_pages=%d branch=%s raw_ocr=%.0f raw_sum=%.0f "
+            "raw_audio=%.0f quote_summary=%.0f quote_audio=%.0f ahead_n=%d ahead=%.0f "
+            "audio_ahead=%.0f",
+            job.id, est.kind, est.chars, est.ocr_pages, est.branch, est.ocr_seconds,
+            est.summarize_seconds, est.audio_seconds, summary_q, audio_q, ahead_n,
+            ahead_seconds, audio_ahead(),
+        )
+        queued = f" It is queued behind {ahead_n} other item(s)." if ahead_n else ""
+        return text + queued, summary_q
 
     def handle(event: dict, say, client) -> None:
         # Ignore our own messages, or we would answer ourselves forever.
@@ -748,16 +863,12 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
         # user has no signal anything is happening. The source is echoed so the thread
         # reads coherently top to bottom. The quoted time is when THIS document should
         # finish — its own estimate plus everything queued ahead of it.
-        est = estimate_seconds(settings, job.target)
-        ahead_n, ahead_seconds = pending.add(est)
-        queued = f" It is queued behind {ahead_n} other item(s)." if ahead_n else ""
-        say(
-            text=f"On it — {job.source_label}. "
-                 f"{eta_line(settings, est + ahead_seconds, tz=user_tz.get(client, job.user))}"
-                 f"{queued}",
-            thread_ts=thread_ts,
-        )
-        _submit(settings, pool, pending, active, client, job, est, audio_submit)
+        tz = user_tz.get(client, job.user)
+        text, est = quote(job, tz)
+        pending.add(est)
+        say(text=f"On it — {job.source_label}. {text}", thread_ts=thread_ts)
+        _submit(settings, pool, pending, active, client, job, est, audio_submit,
+                audio_ahead, tz)
 
     @app.event("app_mention")
     def on_mention(event, say, client):
@@ -791,19 +902,19 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
         audio_submit(audio_job)
     for job in restore(settings):
         log.info("resuming queued job %s (%s)", job.id, job.source_label)
-        est = estimate_seconds(settings, job.target)
-        _n, ahead_seconds = pending.add(est)
+        tz = user_tz.get(app.client, job.user)
+        text, est = quote(job, tz)
+        pending.add(est)
         try:
             app.client.chat_postMessage(
                 channel=job.channel,
                 thread_ts=job.thread_ts,
-                text=f"Picking this back up after a restart — {job.source_label}. "
-                     + eta_line(settings, est + ahead_seconds,
-                                tz=user_tz.get(app.client, job.user)),
+                text=f"Picking this back up after a restart — {job.source_label}. {text}",
             )
         except Exception:
             log.exception("could not notify resume for %s", job.id)
-        _submit(settings, pool, pending, active, app.client, job, est, audio_submit)
+        _submit(settings, pool, pending, active, app.client, job, est, audio_submit,
+                audio_ahead, tz)
 
     return app, pool
 

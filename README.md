@@ -134,6 +134,31 @@ One cost to know about: Kokoro keeps every voice tensor it has served resident, 
 distinct voice in regular use is memory for the life of the TTS server. Two or three is
 fine; the bot says so once when someone picks a voice other than the shared default.
 
+## The estimate learns
+
+The ack quotes two times: when the summary will be in the thread, and when the audio
+will. Each is a per-stage model in things known at ack time (characters, OCR pages,
+which summarize branch) times a **learned correction factor** per stage. Every clean
+completion feeds back `log(actual / predicted)` into an exponentially weighted mean and
+spread for that stage; quotes use the upper side of the spread, so acks land early more
+often than late. The `SCRIBE_ETA_*` constants are only the priors a fresh spool starts
+from. Learned state lives in the `calibration` section of `config.json` beside the spool.
+
+- **Clean completions only.** Retries, cancels and OCR runs that skipped or capped pages
+  teach nothing; one absurd job is clamped so it cannot poison the next ten estimates.
+- **The in-flight job counts at its remaining time**, not its full estimate, when a
+  queue wait is quoted.
+- **The audio quote is re-issued exactly** in the TL;DR reply, from the real listening
+  script length and the audio queue at that moment.
+- **Audit trail in Loki.** Every ack logs `eta.ack ...`, every stage logs `eta.actual ...`,
+  every update logs `eta.learn ...`. To see estimate vs actual per stage:
+
+  ```
+  {namespace="infra", container="scribe"} |~ "eta\\.(ack|actual|learn)"
+  ```
+
+  `scribe calibration` (or the tail of `/scribeconfig`) shows the current factors.
+
 ## Titles are a ladder, and the filename is the bottom rung
 
 A file's name is rarely its title (`03-dynprog.pdf` is a chapter on dynamic programming),
