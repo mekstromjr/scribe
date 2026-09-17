@@ -38,7 +38,7 @@ class AudioResult:
 
 def produce_audio(
     settings: Settings, doc: Document, summary: Summary, *, title: str, author: str,
-    abort: Callable[[], None] = lambda: None,
+    abort: Callable[[], None] = lambda: None, person: str | None = None,
 ) -> AudioResult:
     """Synthesize and package. Raises on failure — the caller decides how quiet to be.
 
@@ -72,7 +72,8 @@ def produce_audio(
 
     m4b = work / "audiobook.m4b"
     audio_seconds = build_m4b(
-        audio_chapters, m4b, title=title, author=author, workdir=work
+        audio_chapters, m4b, title=title, author=author, workdir=work,
+        narrator=settings.tts_voice, series=person, comment=doc.source,
     )
     return AudioResult(
         m4b=m4b,
