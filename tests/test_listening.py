@@ -429,3 +429,27 @@ class TestHeadingHeuristicTightening:
         from scribe.listening import detect_sections
         text = "# #&#&\n\nbody one\n\n# &#&#\n\nbody two\n"
         assert detect_sections(text) == []
+
+
+class TestRepeatedParagraphLint:
+    """scribe#13: a paragraph said twice is a defect; catch it before synthesis."""
+
+    LONG = ("The committee reviewed the proposal at length and concluded that the "
+            "schedule could not be met without additional staff, which the budget did "
+            "not allow for in the current fiscal year, so the item was deferred.")
+
+    def test_duplicate_long_paragraph_is_flagged(self):
+        from scribe.listening import Chapter, lint_script
+        ch = Chapter("c", [f"{self.LONG}\n\nSomething else entirely.\n\n{self.LONG.upper()}"])
+        findings = lint_script([ch])
+        assert any(f.startswith("repeated paragraph x1") for f in findings)
+
+    def test_short_repeats_and_unique_text_are_not(self):
+        from scribe.listening import Chapter, lint_script
+        ch = Chapter("c", ["Chapter One.\n\nBody text here.\n\nChapter One.\n\n" + self.LONG])
+        assert not any("repeated" in f for f in lint_script([ch]))
+
+    def test_repeat_across_segments_and_chapters_counts(self):
+        from scribe.listening import Chapter, lint_script
+        chapters = [Chapter("a", [self.LONG]), Chapter("b", ["intro", self.LONG])]
+        assert any("repeated paragraph" in f for f in lint_script(chapters))
