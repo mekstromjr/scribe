@@ -38,7 +38,7 @@ ALLOWED_KEYS = {"tts_voice", "tts_enabled", "note_format"}
 USERS_KEY = "users"
 # Other reserved sections the bot writes for itself (e.g. "calibration", scribe#8).
 # Read and written whole via load_section/save_section; never surfaced as settings.
-RESERVED_KEYS = {USERS_KEY, "calibration"}
+RESERVED_KEYS = {USERS_KEY, "calibration", "voice_samples"}
 
 
 def config_path(settings: Settings) -> Path:

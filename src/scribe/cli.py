@@ -101,6 +101,65 @@ def _cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_voice_samples(args: argparse.Namespace) -> int:
+    """Build the 'Scribe voice samples' item: one chapter per voice, same passage,
+    uploaded to the shelf, link stored for /scribevoice (scribe#11)."""
+    import tempfile
+
+    from scribe.abs import upload
+    from scribe.package import ChapterAudio, build_m4b
+    from scribe.runtime_config import save_section
+    from scribe.tts import sample_text, synthesize_segment, voices
+
+    settings = load_settings()
+    ids = voices(settings)
+    if args.only:
+        keep = set(args.only.split(","))
+        ids = [v for v in ids if v in keep]
+    print(f"# {len(ids)} voices", file=sys.stderr)
+    with tempfile.TemporaryDirectory(prefix="scribe-samples-") as tmp:
+        work = Path(tmp)
+        chapters: list[ChapterAudio] = []
+        for i, v in enumerate(ids, 1):
+            dest = work / f"{i:03d}-{v}.wav"
+            secs = synthesize_segment(settings, sample_text(v), dest)
+            print(f"# {i}/{len(ids)} {v} in {secs:.0f}s", file=sys.stderr)
+            chapters.append(ChapterAudio(v, [dest]))
+        m4b = work / "voice-samples.m4b"
+        total = build_m4b(chapters, m4b, title=args.title, author="scribe", workdir=work,
+                          comment="One chapter per Kokoro voice, all reading the same passage.")
+        print(f"# packaged {total/60:.1f} min", file=sys.stderr)
+        if args.no_upload:
+            out = Path(args.out or "voice-samples.m4b")
+            out.write_bytes(m4b.read_bytes())
+            print(f"wrote {out}")
+            return 0
+        link = upload(settings, m4b, title=args.title, author="scribe",
+                      tags=["voice samples"], description="Pick a voice, then /scribevoice <id>.")
+    save_section(settings, "voice_samples", {"url": link, "voices": len(ids)})
+    print(f"uploaded: {link}")
+    return 0
+
+
+def _cmd_abs_backfill(args: argparse.Namespace) -> int:
+    """One-off: set series/tag (person) and narrator on existing shelf items that have
+    no series yet (scribe#12)."""
+    from scribe.abs import list_items, set_item_metadata
+
+    settings = load_settings()
+    items = list_items(settings)
+    todo = [it for it in items if not it["series"] and it["title"] != "Scribe voice samples"]
+    print(f"# {len(items)} items, {len(todo)} without a series", file=sys.stderr)
+    for it in todo:
+        if args.dry_run:
+            print(f"would set: {it['title']!r} -> series={args.person} narrator={args.narrator}")
+            continue
+        set_item_metadata(settings, it["id"], narrator=args.narrator, series=args.person,
+                          tags=sorted(set(it["tags"]) | {args.person}))
+        print(f"set: {it['title']!r}")
+    return 0
+
+
 def _cmd_calibration(args: argparse.Namespace) -> int:  # noqa: ARG001
     """Learned per-stage ETA factors (scribe#8), from the runtime config beside the spool."""
     import json
@@ -287,6 +346,21 @@ def main() -> int:
     p_probe = sub.add_parser("probe", help="check whether a PDF has a text layer (no OCR)")
     p_probe.add_argument("target")
     p_probe.set_defaults(func=_cmd_probe)
+
+    p_vs = sub.add_parser("voice-samples",
+                          help="build and upload the one-chapter-per-voice samples item")
+    p_vs.add_argument("--title", default="Scribe voice samples")
+    p_vs.add_argument("--only", help="comma-separated voice ids (testing)")
+    p_vs.add_argument("--no-upload", action="store_true", help="write the m4b locally instead")
+    p_vs.add_argument("--out")
+    p_vs.set_defaults(func=_cmd_voice_samples)
+
+    p_bf = sub.add_parser("abs-backfill",
+                          help="set person series/tag and narrator on shelf items lacking them")
+    p_bf.add_argument("--person", required=True)
+    p_bf.add_argument("--narrator", default="am_michael")
+    p_bf.add_argument("--dry-run", action="store_true")
+    p_bf.set_defaults(func=_cmd_abs_backfill)
 
     p_cal = sub.add_parser("calibration", help="show the learned ETA correction factors")
     p_cal.set_defaults(func=_cmd_calibration)

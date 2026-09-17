@@ -134,6 +134,22 @@ Voice choice is free. A Kokoro voice pack is about half a megabyte and loads onl
 document is synthesized with it, so auditioning a dozen voices costs nothing; the memory
 that server uses is the model and its per-request leak, not voices.
 
+`/scribevoice` with no argument links to **Scribe voice samples** on the shelf, one item
+with a chapter per voice all reading the same passage, then lists the ids grouped by
+language and gender (`af_` American female, `bm_` British male, and so on; `v0` ids are
+older versions). The item is built once by `scribe voice-samples` in the pod and rebuilt
+by hand if the voice list changes.
+
+## Whose file is this
+
+Every m4b on the shelf is filed under the sender: the person's first name (from their
+Slack profile) becomes the item's **series** and a **tag**, the voice id becomes the
+**narrator**, and the source URL or filename the description. The same values are
+written into the file's tags (composer, grouping, comment) and then set on the item
+through the API once the scan finds it, so the sidebar filters work regardless of what
+the scanner read. The shelf shows one series per person. Items from before this existed
+were back-filled with `scribe abs-backfill --person <Name>`.
+
 ## The listening script is rules, measured
 
 The text sent to Kokoro is produced by deterministic rules, not a model. An experiment
