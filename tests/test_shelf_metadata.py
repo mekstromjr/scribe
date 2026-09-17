@@ -167,3 +167,29 @@ class TestAudioJobCarriesPerson:
         enqueue_audio(s, aj)
         assert restore_audio(s)[0].person == "Michael"
         assert "person" in json.loads((tmp_path / "q" / "1.audio").read_text())
+
+
+class TestBackfillSelection:
+    """The first back-fill matched 'lacks this person's tag' and stamped one person's
+    name on everyone's files. Candidates must be UNCLAIMED items only."""
+
+    ITEMS = [
+        {"id": "1", "title": "A", "series": "", "narrator": "am_michael", "tags": ["Michael"]},
+        {"id": "2", "title": "B", "series": "Becky", "narrator": "af_river", "tags": ["Becky"]},
+        {"id": "3", "title": "C", "series": "", "narrator": "", "tags": []},
+        {"id": "4", "title": "Scribe voice samples", "series": "", "narrator": "",
+         "tags": ["voice samples"]},
+    ]
+
+    def test_other_persons_items_are_never_touched(self):
+        got = absmod.backfill_candidates(self.ITEMS, "Becky", known_people={"Michael", "Becky"})
+        assert [i["id"] for i in got] == ["2", "3"]
+
+    def test_own_clean_items_are_skipped_and_series_leftovers_included(self):
+        got = absmod.backfill_candidates(self.ITEMS, "Michael", known_people={"Michael", "Becky"})
+        assert [i["id"] for i in got] == ["3"]
+
+    def test_title_filter(self):
+        got = absmod.backfill_candidates(self.ITEMS, "Becky", known_people={"Michael", "Becky"},
+                                         titles={"C"})
+        assert [i["id"] for i in got] == ["3"]
