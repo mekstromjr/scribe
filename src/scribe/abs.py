@@ -53,8 +53,75 @@ def _library(settings: Settings) -> tuple[str, str]:
     )
 
 
-def upload(settings: Settings, m4b: Path, *, title: str, author: str) -> str:
+def set_item_metadata(settings: Settings, item_id: str, *, narrator: str | None = None,
+                      series: str | None = None, tags: list[str] | None = None,
+                      description: str | None = None) -> None:
+    """Patch narrator / series / tags / description on one item (scribe#12).
+
+    Authoritative over whatever the scanner read from the file: series and tags are
+    library-side concepts ABS does not take from tags reliably. A new series is
+    created by name. Raises ABSError on failure; callers decide how loud to be.
+    """
+    metadata: dict = {}
+    if narrator:
+        metadata["narrators"] = [narrator]
+    if series:
+        metadata["series"] = [{"name": series, "sequence": None}]
+    if description:
+        metadata["description"] = description
+    body: dict = {}
+    if metadata:
+        body["metadata"] = metadata
+    if tags is not None:
+        body["tags"] = tags
+    if not body:
+        return
+    try:
+        httpx.patch(
+            f"{settings.abs_api_url}/api/items/{item_id}/media",
+            headers=_headers(settings), json=body, timeout=60.0,
+        ).raise_for_status()
+    except httpx.HTTPError as exc:
+        raise ABSError(f"metadata update failed for item {item_id}: {exc}") from exc
+
+
+def list_items(settings: Settings) -> list[dict]:
+    """Every item in the Articles library (id, title, series, narrators, tags)."""
+    library_id, _ = _library(settings)
+    out: list[dict] = []
+    page = 0
+    while True:
+        try:
+            resp = httpx.get(
+                f"{settings.abs_api_url}/api/libraries/{library_id}/items",
+                headers=_headers(settings), params={"limit": 100, "page": page},
+                timeout=60.0,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise ABSError(f"cannot list Audiobookshelf items: {exc}") from exc
+        data = resp.json()
+        for it in data.get("results", []):
+            meta = (it.get("media") or {}).get("metadata") or {}
+            out.append({
+                "id": it["id"], "title": meta.get("title"),
+                "series": meta.get("seriesName") or "",
+                "narrator": meta.get("narratorName") or "",
+                "tags": (it.get("media") or {}).get("tags") or [],
+            })
+        if len(out) >= data.get("total", 0) or not data.get("results"):
+            return out
+        page += 1
+
+
+def upload(settings: Settings, m4b: Path, *, title: str, author: str,
+           narrator: str | None = None, series: str | None = None,
+           tags: list[str] | None = None, description: str | None = None) -> str:
     """Upload one m4b; returns a public web link to the item.
+
+    Once the scan surfaces the item, its narrator / series / tags / description are
+    patched (scribe#12); a patch failure is logged, never raised, because the file is
+    already on the shelf.
 
     The upload response carries no item id, so the item is found by polling the
     library's newest additions. If it has not been scanned in time the LIBRARY link is
@@ -120,6 +187,11 @@ def upload(settings: Settings, m4b: Path, *, title: str, author: str) -> str:
         for item in resp.json().get("results", []):
             meta = (item.get("media") or {}).get("metadata") or {}
             if meta.get("title") == title:
+                try:
+                    set_item_metadata(settings, item["id"], narrator=narrator,
+                                      series=series, tags=tags, description=description)
+                except ABSError as exc:
+                    log.warning("%s", exc)
                 return f"{settings.abs_web_url}/item/{item['id']}"
     # Still not indexed: the audio IS uploaded, so hand back the shelf rather than
     # failing a job whose work is done.

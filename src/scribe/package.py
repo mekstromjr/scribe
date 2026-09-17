@@ -74,8 +74,16 @@ def build_m4b(
     title: str,
     author: str,
     workdir: Path,
+    narrator: str | None = None,
+    series: str | None = None,
+    comment: str | None = None,
 ) -> float:
     """Concat + encode. Returns total audio seconds.
+
+    ``narrator`` lands in the composer tag, which Audiobookshelf reads as the
+    narrator; ``series`` in grouping and ``comment`` in comment. The API patch in
+    abs.py is the authoritative metadata; these make the file self-describing if it
+    is ever rescanned or moved (scribe#12).
 
     Mono 64k AAC: Kokoro output is 24 kHz mono speech, where 64 kbps is transparent —
     a 45-minute article lands around 22 MB instead of the ~120 MB stereo-bitrate
@@ -108,6 +116,9 @@ def build_m4b(
         "-metadata", f"album={title}",
         "-metadata", f"artist={author}",
         "-metadata", "genre=Article",
+        *(["-metadata", f"composer={narrator}"] if narrator else []),
+        *(["-metadata", f"grouping={series}"] if series else []),
+        *(["-metadata", f"comment={comment}"] if comment else []),
         "-movflags", "+faststart",
         "-f", "mp4",
         str(dest),

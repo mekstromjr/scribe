@@ -148,7 +148,7 @@ class TestAudioWorker:
         set_value(s, "tts_voice", "af_sky")  # changed AFTER hand-off
         seen = {}
 
-        def fake_produce(settings, doc, summary, *, title, author, abort=lambda: None):
+        def fake_produce(settings, doc, summary, *, title, author, abort=lambda: None, **kw):
             seen["voice"] = settings.tts_voice
             raise RuntimeError("stop here")
 
@@ -216,7 +216,7 @@ class TestOverlap:
         started = threading.Event()
         timeline: list[str] = []
 
-        def slow_produce(settings, doc, summary, *, title, author, abort=lambda: None):
+        def slow_produce(settings, doc, summary, *, title, author, abort=lambda: None, **kw):
             started.set()
             timeline.append("audio-start")
             release.wait(5)

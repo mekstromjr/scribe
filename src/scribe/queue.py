@@ -83,6 +83,9 @@ class AudioJob:
     # the audio worker can learn from actual-vs-predicted (scribe#8).
     script_chars: int = 0
     predicted_raw: float = 0.0
+    # Sender's display name, for the shelf's series/tag (scribe#12). Resolved at
+    # hand-off so the audio worker never calls Slack.
+    person: str | None = None
 
 
 def spool(settings: Settings) -> Path:
