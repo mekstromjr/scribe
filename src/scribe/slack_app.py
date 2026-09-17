@@ -47,9 +47,9 @@ from scribe.queue import (
     restore_audio,
     spool,
 )
-from scribe.runtime_config import effective, load, set_value
+from scribe.runtime_config import effective, load, load_section, set_value
 from scribe.summarize import Summary, summarize
-from scribe.tts import TTSError, voices
+from scribe.tts import TTSError, describe_voice, grouped_voices, voices
 
 log = logging.getLogger("scribe.slack")
 
@@ -128,6 +128,42 @@ class _Active:
             return job_id in self._canceled
 
 
+class _UserName:
+    """Cached Slack display names (users.info real_name, falling back to display
+    name), for the shelf's per-person series and tag (scribe#12). A miss returns
+    None and the item simply has no series; never blocks a job."""
+
+    TTL_SECONDS = 24 * 3600.0
+
+    def __init__(self) -> None:
+        self._cache: dict[str, tuple[str | None, float]] = {}
+        self._lock = threading.Lock()
+
+    def get(self, client, user_id: str | None) -> str | None:
+        if not user_id:
+            return None
+        now = time.monotonic()
+        with self._lock:
+            hit = self._cache.get(user_id)
+            if hit and now - hit[1] < self.TTL_SECONDS:
+                return hit[0]
+        name: str | None = None
+        try:
+            u = client.users_info(user=user_id).get("user", {}) or {}
+            prof = u.get("profile") or {}
+            name = (u.get("real_name") or prof.get("real_name") or prof.get("display_name")
+                    or u.get("name") or None)
+            # First name only: the shelf shows "Michael", not a full legal name, and
+            # family members share a surname anyway.
+            if name:
+                name = name.split()[0]
+        except Exception:
+            log.warning("users.info failed for %s; item will have no series", user_id)
+        with self._lock:
+            self._cache[user_id] = (name, now)
+        return name
+
+
 class _UserTz:
     """Cached Slack profile timezones. Slack keeps a user's tz current as they travel,
     so the profile beats any configured zone — but users.info per message would be
@@ -192,7 +228,7 @@ def download_file(settings: Settings, file_info: dict, dest: Path) -> Path:
 
 
 def _audio_stage(settings: Settings, client, job, doc, summary,
-                 abort=lambda: None) -> float | None:
+                 abort=lambda: None, person: str | None = None) -> float | None:
     """Synthesize, upload to Audiobookshelf, and post the m4b in-thread.
 
     Never raises. Each delivery step degrades independently: an ABS outage still posts
@@ -205,7 +241,8 @@ def _audio_stage(settings: Settings, client, job, doc, summary,
     author = doc.source if doc.kind == "link" else "scribe"
     t0 = time.monotonic()
     try:
-        result = produce_audio(settings, doc, summary, title=title, author=author, abort=abort)
+        result = produce_audio(settings, doc, summary, title=title, author=author,
+                               abort=abort, person=person)
     except JobCanceled:
         raise
     except Exception as exc:
@@ -222,7 +259,11 @@ def _audio_stage(settings: Settings, client, job, doc, summary,
         minutes = result.audio_seconds / 60
         abs_line = ""
         try:
-            link = upload(settings, result.m4b, title=title, author=author)
+            link = upload(
+                settings, result.m4b, title=title, author=author,
+                narrator=settings.tts_voice, series=person,
+                tags=[person] if person else [], description=doc.source,
+            )
             abs_line = f"Listen in <{link}|Audiobookshelf> ({minutes:.0f} min)."
         except ABSError as exc:
             log.warning("ABS upload failed for %s: %s", job.source_label, exc)
@@ -288,7 +329,8 @@ def _note_stage(settings: Settings, client, job: Job, doc, summary) -> None:
 
 def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
              active: _Active | None = None, audio_submit=lambda _aj: None,
-             audio_ahead=lambda: 0.0, tz: str | None = None) -> None:
+             audio_ahead=lambda: 0.0, tz: str | None = None,
+             person: str | None = None) -> None:
     """Run the summarize half of the pipeline and reply in-thread. Never raises —
     failures are reported to Slack.
 
@@ -408,6 +450,7 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
                     overrides={"tts_voice": settings.tts_voice,
                                "tts_enabled": settings.tts_enabled},
                     script_chars=script_chars, predicted_raw=audio_raw,
+                    person=person,
                 )
                 enqueue_audio(settings, audio_job)
                 audio_submit(audio_job)
@@ -479,7 +522,8 @@ def _process_audio(settings: Settings, client, job: AudioJob,
         abort()
         doc = Document.model_validate(job.doc)
         summary = Summary.model_validate(job.summary)
-        synth_wall = _audio_stage(settings, client, job, doc, summary, abort=abort)
+        synth_wall = _audio_stage(settings, client, job, doc, summary, abort=abort,
+                                  person=job.person)
         if synth_wall and job.predicted_raw > 0:
             log.info("eta.actual job=%s stage=audio predicted=%.0f actual=%.0f script_chars=%d",
                      job.id, job.predicted_raw, synth_wall, job.script_chars)
@@ -546,17 +590,18 @@ class _Pending:
 def _submit(settings: Settings, pool: ThreadPoolExecutor, pending: _Pending,
             active: _Active, client, job: Job, est_seconds: float,
             audio_submit=lambda _aj: None, audio_ahead=lambda: 0.0,
-            tz: str | None = None) -> None:
+            tz: str | None = None, person: str | None = None) -> None:
     def requeue(j: Job) -> None:
         # Back of the queue, not the front: a document whose dependency is down should not
         # block everything behind it while it retries.
         pending.add(est_seconds)
         _submit(settings, pool, pending, active, client, j, est_seconds, audio_submit,
-                audio_ahead, tz)
+                audio_ahead, tz, person)
 
     def run() -> None:
         pending.start(est_seconds)
-        _process(settings, client, job, requeue, active, audio_submit, audio_ahead, tz)
+        _process(settings, client, job, requeue, active, audio_submit, audio_ahead, tz,
+                 person)
 
     active.add(job)
     fut = pool.submit(run)
@@ -608,6 +653,22 @@ def _ack_text(settings: Settings, est: Estimate, cal: Calibration, ahead_seconds
     return text + ".", summary_q, audio_q
 
 
+def _voice_menu(settings: Settings, available: list[str], current: str) -> str:
+    """The no-argument /scribevoice reply: a link to the samples on the shelf, then the
+    voices grouped by language and gender (scribe#11)."""
+    lines = [f"Your voice: *{current}*  ({describe_voice(current)})"]
+    link = load_section(settings, "voice_samples").get("url")
+    if link:
+        lines.append(f"Hear every voice read the same passage: <{link}|Scribe voice samples> "
+                     f"(one chapter per voice).")
+    lines.append("Pick one with `/scribevoice <id>`. `v0` ids are older versions of the "
+                 "same voice.")
+    for group, ids in grouped_voices(available):
+        marked = [f"`{v}`{' ←' if v == current else ''}" for v in ids]
+        lines.append(f"*{group}:* " + ", ".join(marked))
+    return "\n".join(lines)
+
+
 def _register_config_commands(app: App, settings: Settings) -> None:
     """Slash commands for on-the-fly configuration (scribe#2, per-user in scribe#6).
 
@@ -647,11 +708,7 @@ def _register_config_commands(app: App, settings: Settings) -> None:
             respond(f"Couldn't reach the TTS server to list voices: {exc}")
             return
         if not wanted:
-            listing = "\n".join(
-                f"• `{v}`{'  ← current' if v == current.tts_voice else ''}"
-                for v in available
-            )
-            respond(f"Your voice: *{current.tts_voice}*\n\n{listing}")
+            respond(_voice_menu(settings, available, current.tts_voice))
             return
         if wanted not in available:
             near = [v for v in available if wanted.lower() in v.lower()]
@@ -748,6 +805,7 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
     audio_pending = _Pending()
     active = _Active()
     user_tz = _UserTz()
+    user_name = _UserName()
 
     def audio_submit(aj: AudioJob) -> None:
         _submit_audio(settings, audio_pool, audio_pending, active, app.client, aj)
@@ -864,7 +922,7 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
         pending.add(est)
         say(text=f"On it — {job.source_label}. {text}", thread_ts=thread_ts)
         _submit(settings, pool, pending, active, client, job, est, audio_submit,
-                audio_ahead, tz)
+                audio_ahead, tz, user_name.get(client, job.user))
 
     @app.event("app_mention")
     def on_mention(event, say, client):
@@ -910,7 +968,7 @@ def build_app(settings: Settings) -> tuple[App, ThreadPoolExecutor]:
         except Exception:
             log.exception("could not notify resume for %s", job.id)
         _submit(settings, pool, pending, active, app.client, job, est, audio_submit,
-                audio_ahead, tz)
+                audio_ahead, tz, user_name.get(app.client, job.user))
 
     return app, pool
 

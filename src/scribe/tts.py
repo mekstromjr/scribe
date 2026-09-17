@@ -50,6 +50,54 @@ def health(settings: Settings) -> None:
 _RETRY_WAITS = (10.0, 60.0)
 
 
+# Kokoro voice ids encode language and gender in their prefix: "af_bella" is an
+# American female voice, "bm_george" British male. v0 ids are older versions.
+LANGUAGES = {
+    "a": "American English", "b": "British English", "e": "Spanish", "f": "French",
+    "h": "Hindi", "i": "Italian", "j": "Japanese", "p": "Portuguese", "z": "Chinese",
+}
+GENDERS = {"f": "female", "m": "male"}
+
+# What every sample voice reads (scribe#11). Identical text per voice so the ear
+# compares voices, not sentences. ~15 s at speech pace.
+SAMPLE_PASSAGE = (
+    "Scribe reads your articles aloud, so you can listen on a walk or a drive. "
+    "This is how I sound reading a longer sentence, with a pause in the middle, "
+    "and a question at the end. Does this voice work for you?"
+)
+
+
+def describe_voice(voice: str) -> str:
+    """'af_bella' -> 'American English, female'; unknown shapes pass through."""
+    if len(voice) >= 3 and voice[2] == "_" and voice[0] in LANGUAGES and voice[1] in GENDERS:
+        return f"{LANGUAGES[voice[0]]}, {GENDERS[voice[1]]}"
+    return "other"
+
+
+def grouped_voices(voices: list[str]) -> list[tuple[str, list[str]]]:
+    """Voices grouped by language+gender, English first, current-generation ids before
+    their v0 predecessors within a group."""
+    order = ["a", "b", "e", "f", "h", "i", "j", "p", "z"]
+    groups: dict[str, list[str]] = {}
+    for v in voices:
+        groups.setdefault(describe_voice(v), []).append(v)
+
+    def group_key(name: str) -> tuple[int, str]:
+        for i, lang in enumerate(order):
+            if name.startswith(LANGUAGES[lang]):
+                return i, name
+        return len(order), name
+
+    def voice_key(v: str) -> tuple[int, str]:
+        return ("_v0" in v, v)
+
+    return [(g, sorted(groups[g], key=voice_key)) for g in sorted(groups, key=group_key)]
+
+
+def sample_text(voice: str) -> str:
+    return f"Hello, I'm {voice.replace('_', ' ')}. {SAMPLE_PASSAGE}"
+
+
 def synthesize_segment(settings: Settings, text: str, dest: Path) -> float:
     """Synthesize one segment to ``dest``. Returns wall-clock seconds.
 
