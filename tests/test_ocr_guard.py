@@ -206,3 +206,44 @@ class TestProvenance:
             "**2 page(s) SKIPPED (OCR runaway, cut at 3000 tokens; "
             "OCR timed out after 900s)**"
         ) in line
+
+
+class TestRepeatCollapse:
+    """scribe#13: the model transcribed a page, its running header, then the page again,
+    under the token cap; two minutes of audio played twice."""
+
+    PAGE = "\n".join([
+        "Language is a complicated and versatile instrument. People learn to use it in",
+        "much the same way as they learn to use other tools, such as automobiles or",
+        "kitchen equipment. Youngsters who do much riding with their parents or friends",
+        "seldom need formal instruction in driving a car. They acquire their knowledge by",
+        "observation and imitation. In the same way, those who spend much time in the",
+        "kitchen learn to use complicated kitchen appliances. The case is similar with",
+        "language. Certainly in childhood, and for many of us throughout our lives, we",
+        "learn the proper use of language by observing and imitating the linguistic",
+        "behavior of the people we meet. There are, however, limits to this informal learning.",
+    ])
+
+    def test_page_repeated_after_a_running_header_is_cut(self):
+        from scribe.extract.ocr import collapse_repetition
+        text = self.PAGE + "\n4.1 PURPOSES OF DEFINITION\n" + self.PAGE
+        out, cut = collapse_repetition(text)
+        assert cut and out == self.PAGE
+
+    def test_page_repeated_without_header_is_cut(self):
+        from scribe.extract.ocr import collapse_repetition
+        out, cut = collapse_repetition(self.PAGE + "\n" + self.PAGE)
+        assert cut and out.strip() == self.PAGE
+
+    def test_clean_page_untouched(self):
+        from scribe.extract.ocr import collapse_repetition
+        out, cut = collapse_repetition(self.PAGE)
+        assert not cut and out == self.PAGE
+
+    def test_legitimate_short_repeats_survive(self):
+        from scribe.extract.ocr import collapse_repetition
+        tail = ("More different text follows here at length, enough to make the page long "
+                "but not repeated in any 160-character window at all.")
+        text = "Chapter 4\n" + self.PAGE + "\nChapter 4\n" + tail
+        out, cut = collapse_repetition(text)
+        assert not cut and out == text
