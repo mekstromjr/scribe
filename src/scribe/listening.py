@@ -487,7 +487,47 @@ def lint_script(chapters: list[Chapter]) -> list[str]:
         i = hits[0].start()
         context = " ".join(text[max(0, i - 40): i + 40].split())
         findings.append(f"{name} x{len(hits)}, e.g. ...{context}...")
+    dupes = repeated_paragraphs(text)
+    if dupes:
+        first = dupes[0]
+        findings.append(
+            f"repeated paragraph x{len(dupes)}, e.g. ...{' '.join(first[:80].split())}..."
+        )
     return findings
+
+
+# A paragraph this long said twice is a defect, not a refrain (scribe#13). Shorter
+# repeats are legitimately common: headings re-spoken at a chapter top, "Figure 3",
+# a poem's chorus.
+_REPEAT_MIN_CHARS = 200
+
+
+def _normalize_paragraph(p: str) -> str:
+    return re.sub(r"[^a-z0-9 ]+", "", " ".join(p.lower().split()))
+
+
+def repeated_paragraphs(text: str) -> list[str]:
+    """Paragraphs of at least _REPEAT_MIN_CHARS that occur more than once anywhere in
+    the script (after case/punctuation normalization). Returns one representative per
+    repeated paragraph, in order of first appearance.
+
+    Catches script-side duplication before synthesis: a redline PDF whose text layer
+    carries both the struck and the inserted version of a paragraph, a section that
+    the reflow or chapter builder emitted twice. Repetition that originates in the TTS
+    model is invisible here; that is the speech-to-text experiment on #13.
+    """
+    seen: dict[str, str] = {}
+    out: list[str] = []
+    flagged: set[str] = set()
+    for para in text.split("\n\n"):
+        if len(para) < _REPEAT_MIN_CHARS:
+            continue
+        key = _normalize_paragraph(para)
+        if key in seen and key not in flagged:
+            out.append(seen[key])
+            flagged.add(key)
+        seen.setdefault(key, para)
+    return out
 
 
 # --- Structure detection (scribe#3) ---------------------------------------------
