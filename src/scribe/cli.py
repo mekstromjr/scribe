@@ -142,20 +142,24 @@ def _cmd_voice_samples(args: argparse.Namespace) -> int:
 
 
 def _cmd_abs_backfill(args: argparse.Namespace) -> int:
-    """One-off: set series/tag (person) and narrator on existing shelf items that have
-    no series yet (scribe#12)."""
-    from scribe.abs import list_items, set_item_metadata
+    """One-off: put existing shelf items in the person's collection, tag them, set the
+    narrator, and clear any series the first cut of #12 left behind."""
+    from scribe.abs import add_to_collection, list_items, set_item_metadata
 
     settings = load_settings()
     items = list_items(settings)
-    todo = [it for it in items if not it["series"] and it["title"] != "Scribe voice samples"]
-    print(f"# {len(items)} items, {len(todo)} without a series", file=sys.stderr)
+    todo = [it for it in items if it["title"] != "Scribe voice samples"
+            and (args.person not in it["tags"] or it["series"])]
+    print(f"# {len(items)} items, {len(todo)} to update", file=sys.stderr)
     for it in todo:
         if args.dry_run:
-            print(f"would set: {it['title']!r} -> series={args.person} narrator={args.narrator}")
+            print(f"would set: {it['title']!r} -> collection={args.person} "
+                  f"narrator={args.narrator} clear_series={bool(it['series'])}")
             continue
-        set_item_metadata(settings, it["id"], narrator=args.narrator, series=args.person,
-                          tags=sorted(set(it["tags"]) | {args.person}))
+        set_item_metadata(settings, it["id"], narrator=args.narrator,
+                          tags=sorted(set(it["tags"]) | {args.person}),
+                          clear_series=bool(it["series"]))
+        add_to_collection(settings, it["id"], args.person)
         print(f"set: {it['title']!r}")
     return 0
 
@@ -356,7 +360,7 @@ def main() -> int:
     p_vs.set_defaults(func=_cmd_voice_samples)
 
     p_bf = sub.add_parser("abs-backfill",
-                          help="set person series/tag and narrator on shelf items lacking them")
+                          help="put shelf items in the person's collection, tag, set narrator")
     p_bf.add_argument("--person", required=True)
     p_bf.add_argument("--narrator", default="am_michael")
     p_bf.add_argument("--dry-run", action="store_true")

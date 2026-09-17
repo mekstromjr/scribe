@@ -73,7 +73,7 @@ def produce_audio(
     m4b = work / "audiobook.m4b"
     audio_seconds = build_m4b(
         audio_chapters, m4b, title=title, author=author, workdir=work,
-        narrator=settings.tts_voice, series=person, comment=doc.source,
+        narrator=settings.tts_voice, grouping=person, comment=doc.source,
     )
     return AudioResult(
         m4b=m4b,

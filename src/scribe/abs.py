@@ -54,19 +54,19 @@ def _library(settings: Settings) -> tuple[str, str]:
 
 
 def set_item_metadata(settings: Settings, item_id: str, *, narrator: str | None = None,
-                      series: str | None = None, tags: list[str] | None = None,
-                      description: str | None = None) -> None:
-    """Patch narrator / series / tags / description on one item (scribe#12).
+                      tags: list[str] | None = None, description: str | None = None,
+                      clear_series: bool = False) -> None:
+    """Patch narrator / tags / description on one item (scribe#12).
 
-    Authoritative over whatever the scanner read from the file: series and tags are
-    library-side concepts ABS does not take from tags reliably. A new series is
-    created by name. Raises ABSError on failure; callers decide how loud to be.
+    Authoritative over whatever the scanner read from the file. Raises ABSError on
+    failure; callers decide how loud to be. ``clear_series`` empties the series list
+    (the first cut of #12 used series per person; collections replaced that).
     """
     metadata: dict = {}
     if narrator:
         metadata["narrators"] = [narrator]
-    if series:
-        metadata["series"] = [{"name": series, "sequence": None}]
+    if clear_series:
+        metadata["series"] = []
     if description:
         metadata["description"] = description
     body: dict = {}
@@ -83,6 +83,35 @@ def set_item_metadata(settings: Settings, item_id: str, *, narrator: str | None 
         ).raise_for_status()
     except httpx.HTTPError as exc:
         raise ABSError(f"metadata update failed for item {item_id}: {exc}") from exc
+
+
+def add_to_collection(settings: Settings, item_id: str, name: str) -> None:
+    """Put an item in the library collection called ``name``, creating it if needed.
+
+    Collections, not series, for "whose files are these" (owner's call, 2026-09-16): a
+    series is one ordered work, a collection is a named shelf of unrelated items, and
+    it gets its own tab in the library. Idempotent: ABS ignores a duplicate add.
+    """
+    library_id, _ = _library(settings)
+    try:
+        resp = httpx.get(f"{settings.abs_api_url}/api/collections", headers=_headers(settings),
+                         timeout=30.0)
+        resp.raise_for_status()
+        existing = [c for c in resp.json().get("collections", [])
+                    if c.get("name") == name and c.get("libraryId") == library_id]
+        if existing:
+            coll_id = existing[0]["id"]
+            if any((b.get("id") == item_id) for b in existing[0].get("books", [])):
+                return
+            httpx.post(f"{settings.abs_api_url}/api/collections/{coll_id}/book",
+                       headers=_headers(settings), json={"id": item_id},
+                       timeout=30.0).raise_for_status()
+        else:
+            httpx.post(f"{settings.abs_api_url}/api/collections", headers=_headers(settings),
+                       json={"libraryId": library_id, "name": name, "books": [item_id]},
+                       timeout=30.0).raise_for_status()
+    except httpx.HTTPError as exc:
+        raise ABSError(f"could not add item {item_id} to collection {name!r}: {exc}") from exc
 
 
 def list_items(settings: Settings) -> list[dict]:
@@ -115,13 +144,13 @@ def list_items(settings: Settings) -> list[dict]:
 
 
 def upload(settings: Settings, m4b: Path, *, title: str, author: str,
-           narrator: str | None = None, series: str | None = None,
+           narrator: str | None = None, collection: str | None = None,
            tags: list[str] | None = None, description: str | None = None) -> str:
     """Upload one m4b; returns a public web link to the item.
 
-    Once the scan surfaces the item, its narrator / series / tags / description are
-    patched (scribe#12); a patch failure is logged, never raised, because the file is
-    already on the shelf.
+    Once the scan surfaces the item, its narrator / tags / description are patched and
+    it is added to ``collection`` (scribe#12); a failure there is logged, never
+    raised, because the file is already on the shelf.
 
     The upload response carries no item id, so the item is found by polling the
     library's newest additions. If it has not been scanned in time the LIBRARY link is
@@ -189,7 +218,9 @@ def upload(settings: Settings, m4b: Path, *, title: str, author: str,
             if meta.get("title") == title:
                 try:
                     set_item_metadata(settings, item["id"], narrator=narrator,
-                                      series=series, tags=tags, description=description)
+                                      tags=tags, description=description)
+                    if collection:
+                        add_to_collection(settings, item["id"], collection)
                 except ABSError as exc:
                     log.warning("%s", exc)
                 return f"{settings.abs_web_url}/item/{item['id']}"
