@@ -659,17 +659,13 @@ def _register_config_commands(app: App, settings: Settings) -> None:
             respond(f"`{wanted}` is not a voice this server serves.{hint}")
             return
         set_value(settings, "tts_voice", wanted, user=user)
-        # Kokoro keeps every voice tensor it has ever served resident (k8s#145/#146), so
-        # each distinct voice in regular use costs memory for the life of the server.
-        # Worth saying once at the moment someone diverges from the shared default.
-        memo = ""
-        if user is not None and wanted != effective(settings).tts_voice:
-            memo = ("\n_Heads up: each distinct voice in use stays loaded in the TTS "
-                    "server's memory; two or three is fine, a different voice per person "
-                    "is not free._")
+        # No memory caveat here. Measured 2026-09-16 in the Kokoro pod: a voice pack
+        # is 523 KB, all 68 together 35 MB, and nothing loads until a document is
+        # synthesized. The old "seven voices OOM'd 2Gi" note blamed voices for the
+        # per-request leak (k8s#146). Audition as many as you like.
         respond(
             f"Voice set to *{wanted}* {scope} from the next document. "
-            f"{_state_line(effective(settings, user))}{memo}"
+            f"{_state_line(effective(settings, user))}"
         )
 
     def _toggle(key: str, label: str, respond, command) -> None:

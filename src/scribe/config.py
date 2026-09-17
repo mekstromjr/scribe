@@ -149,9 +149,10 @@ class Settings(BaseSettings):
     tts_host: str = "http://kokoro-tts.infra.svc.cluster.local:8880"
 
     # af_bella, chosen by ear from samples on 2026-08-27 (af_heart and am_michael were
-    # the runners-up). ONE voice per deployment, not per-request variety: the server
-    # caches every voice tensor it loads and OOM-killed a 2Gi limit when a sampling
-    # run loaded seven (k8s#145) — the 3Gi limit assumes a single cached voice.
+    # the runners-up). The shared default; users pick their own with /scribevoice.
+    # Voice count is NOT a memory concern: a voice pack is 523 KB (all 68: 35 MB,
+    # measured 2026-09-16). The 2026-08 OOM once blamed on "seven cached voices" was
+    # the per-request leak in k8s#146.
     tts_voice: str = "af_bella"
 
     # Per-request text cap. Kokoro splits internally, but request-level chunking keeps
