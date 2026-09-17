@@ -75,13 +75,13 @@ def build_m4b(
     author: str,
     workdir: Path,
     narrator: str | None = None,
-    series: str | None = None,
+    grouping: str | None = None,
     comment: str | None = None,
 ) -> float:
     """Concat + encode. Returns total audio seconds.
 
     ``narrator`` lands in the composer tag, which Audiobookshelf reads as the
-    narrator; ``series`` in grouping and ``comment`` in comment. The API patch in
+    narrator; ``grouping`` (the person) in grouping and ``comment`` in comment. The API patch in
     abs.py is the authoritative metadata; these make the file self-describing if it
     is ever rescanned or moved (scribe#12).
 
@@ -117,7 +117,7 @@ def build_m4b(
         "-metadata", f"artist={author}",
         "-metadata", "genre=Article",
         *(["-metadata", f"composer={narrator}"] if narrator else []),
-        *(["-metadata", f"grouping={series}"] if series else []),
+        *(["-metadata", f"grouping={grouping}"] if grouping else []),
         *(["-metadata", f"comment={comment}"] if comment else []),
         "-movflags", "+faststart",
         "-f", "mp4",

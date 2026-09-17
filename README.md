@@ -142,13 +142,15 @@ by hand if the voice list changes.
 
 ## Whose file is this
 
-Every m4b on the shelf is filed under the sender: the person's first name (from their
-Slack profile) becomes the item's **series** and a **tag**, the voice id becomes the
-**narrator**, and the source URL or filename the description. The same values are
-written into the file's tags (composer, grouping, comment) and then set on the item
-through the API once the scan finds it, so the sidebar filters work regardless of what
-the scanner read. The shelf shows one series per person. Items from before this existed
-were back-filled with `scribe abs-backfill --person <Name>`.
+Every m4b on the shelf is filed under the sender: the item joins a **collection** named
+with the person's first name (from their Slack profile) and gets a **tag** with it, the
+voice id becomes the **narrator**, and the source URL or filename the description. A
+collection rather than a series because a series is one ordered work and a collection is
+a named shelf of unrelated items, with its own tab in the library. The voice and person
+are also written into the file's tags (composer, grouping, comment), and everything is
+set through the API once the scan finds the item, so it holds regardless of what the
+scanner read. Items from before this existed were back-filled with
+`scribe abs-backfill --person <Name>`.
 
 ## The listening script is rules, measured
 
