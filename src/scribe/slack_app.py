@@ -261,7 +261,7 @@ def _audio_stage(settings: Settings, client, job, doc, summary,
         try:
             link = upload(
                 settings, result.m4b, title=title, author=author,
-                narrator=settings.tts_voice, series=person,
+                narrator=settings.tts_voice, collection=person,
                 tags=[person] if person else [], description=doc.source,
             )
             abs_line = f"Listen in <{link}|Audiobookshelf> ({minutes:.0f} min)."

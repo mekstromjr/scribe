@@ -84,7 +84,7 @@ class TestM4bTags:
         wav.write_bytes(b"RIFF")
         package.build_m4b([package.ChapterAudio("c", [wav])], tmp_path / "o.m4b", title="T",
                           author="A", workdir=tmp_path, narrator="bm_george",
-                          series="Michael", comment="https://x")
+                          grouping="Michael", comment="https://x")
         cmd = seen["cmd"]
         assert "composer=bm_george" in cmd and "grouping=Michael" in cmd
         assert "comment=https://x" in cmd
@@ -104,15 +104,52 @@ class TestAbsMetadata:
 
         monkeypatch.setattr(absmod.httpx, "patch", fake_patch)
         s = Settings(abs_token="t", abs_api_url="http://abs")
-        absmod.set_item_metadata(s, "item1", narrator="bm_george", series="Michael",
+        absmod.set_item_metadata(s, "item1", narrator="bm_george",
                                  tags=["Michael"], description="https://x")
         assert sent["url"].endswith("/api/items/item1/media")
         assert sent["json"] == {
-            "metadata": {"narrators": ["bm_george"],
-                         "series": [{"name": "Michael", "sequence": None}],
-                         "description": "https://x"},
+            "metadata": {"narrators": ["bm_george"], "description": "https://x"},
             "tags": ["Michael"],
         }
+
+    def test_collection_created_then_reused(self, monkeypatch):
+        calls = []
+        state = {"collections": []}
+
+        class R:
+            def __init__(self, data=None):
+                self.data = data or {}
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self.data
+
+        def fake_get(url, headers=None, timeout=None, **kw):
+            if url.endswith("/api/libraries"):
+                return R({"libraries": [{"name": "Articles", "id": "L1",
+                                         "folders": [{"id": "F1"}]}]})
+            return R({"collections": state["collections"]})
+
+        def fake_post(url, headers=None, json=None, timeout=None):
+            calls.append((url.rsplit("/api", 1)[1], json))
+            if url.endswith("/api/collections"):
+                state["collections"].append({"id": "C1", "name": json["name"],
+                                             "libraryId": "L1",
+                                             "books": [{"id": b} for b in json["books"]]})
+            return R()
+
+        monkeypatch.setattr(absmod.httpx, "get", fake_get)
+        monkeypatch.setattr(absmod.httpx, "post", fake_post)
+        s = Settings(abs_token="t", abs_api_url="http://abs")
+        absmod.add_to_collection(s, "i1", "Michael")   # creates
+        absmod.add_to_collection(s, "i2", "Michael")   # adds
+        absmod.add_to_collection(s, "i1", "Michael")   # already there: no call
+        assert calls == [
+            ("/collections", {"libraryId": "L1", "name": "Michael", "books": ["i1"]}),
+            ("/collections/C1/book", {"id": "i2"}),
+        ]
 
     def test_empty_patch_is_a_noop(self, monkeypatch):
         called = []
