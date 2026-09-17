@@ -372,18 +372,18 @@ class TestPerUserCommands:
         assert effective(settings, "U1").tts_enabled is False
         assert effective(settings, "U2").tts_enabled is True
 
-    def test_voice_is_per_user_and_warns_when_diverging(self, tmp_path, monkeypatch):
+    def test_voice_is_per_user_with_no_memory_nag(self, tmp_path, monkeypatch):
+        """Voice packs are ~0.5 MB and load only on synthesis (measured 2026-09-16), so
+        auditioning voices must not be discouraged."""
         from scribe import slack_app
         from scribe.runtime_config import effective
 
         monkeypatch.setattr(slack_app, "voices", lambda s: ["af_bella", "bm_george"])
         settings, h = self._handlers(tmp_path)
         reply = self._call(h["/scribevoice"], "bm_george", user="U1")
-        assert "for you" in reply and "stays loaded" in reply
+        assert "for you" in reply and "memory" not in reply.lower()
         assert effective(settings, "U1").tts_voice == "bm_george"
         assert effective(settings, "U2").tts_voice == "af_bella"
-        # Setting the shared default carries no divergence warning.
-        assert "stays loaded" not in self._call(h["/scribevoice"], "bm_george default")
 
     def test_config_shows_own_and_shared(self, tmp_path):
         _, h = self._handlers(tmp_path)
