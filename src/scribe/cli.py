@@ -142,22 +142,28 @@ def _cmd_voice_samples(args: argparse.Namespace) -> int:
 
 
 def _cmd_abs_backfill(args: argparse.Namespace) -> int:
-    """One-off: put existing shelf items in the person's collection, tag them, set the
-    narrator, and clear any series the first cut of #12 left behind."""
-    from scribe.abs import add_to_collection, list_items, set_item_metadata
+    """Put UNCLAIMED shelf items in the person's collection, tag them, optionally set
+    the narrator, and clear a leftover series. Never touches another person's items."""
+    from scribe.abs import add_to_collection, backfill_candidates, list_items, set_item_metadata
 
     settings = load_settings()
     items = list_items(settings)
-    todo = [it for it in items if it["title"] != "Scribe voice samples"
-            and (args.person not in it["tags"] or it["series"])]
-    print(f"# {len(items)} items, {len(todo)} to update", file=sys.stderr)
+    # Every person seen on the shelf so far: any tag that is also a collection name
+    # would be better, but tags alone are enough to refuse to cross-stamp.
+    known = {t for it in items for t in it["tags"] if t and t[0].isupper()} | {args.person}
+    titles = set(args.title) if args.title else None
+    todo = backfill_candidates(items, args.person, known_people=known, titles=titles)
+    print(f"# {len(items)} items, {len(todo)} unclaimed candidate(s) for {args.person}",
+          file=sys.stderr)
     for it in todo:
+        narrator = args.narrator or None  # None = keep whatever the item has
         if args.dry_run:
             print(f"would set: {it['title']!r} -> collection={args.person} "
-                  f"narrator={args.narrator} clear_series={bool(it['series'])}")
+                  f"narrator={narrator or it['narrator'] or '(unchanged)'} "
+                  f"clear_series={bool(it['series'])}")
             continue
-        set_item_metadata(settings, it["id"], narrator=args.narrator,
-                          tags=sorted(set(it["tags"]) | {args.person}),
+        set_item_metadata(settings, it["id"], narrator=narrator,
+                          tags=sorted((set(it["tags"]) - known) | {args.person}),
                           clear_series=bool(it["series"]))
         add_to_collection(settings, it["id"], args.person)
         print(f"set: {it['title']!r}")
@@ -362,7 +368,8 @@ def main() -> int:
     p_bf = sub.add_parser("abs-backfill",
                           help="put shelf items in the person's collection, tag, set narrator")
     p_bf.add_argument("--person", required=True)
-    p_bf.add_argument("--narrator", default="am_michael")
+    p_bf.add_argument("--narrator", help="set the narrator; default keeps the item's own")
+    p_bf.add_argument("--title", action="append", help="only this title (repeatable)")
     p_bf.add_argument("--dry-run", action="store_true")
     p_bf.set_defaults(func=_cmd_abs_backfill)
 

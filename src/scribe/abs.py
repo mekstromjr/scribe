@@ -114,6 +114,31 @@ def add_to_collection(settings: Settings, item_id: str, name: str) -> None:
         raise ABSError(f"could not add item {item_id} to collection {name!r}: {exc}") from exc
 
 
+def backfill_candidates(items: list[dict], person: str, *, known_people: set[str],
+                        titles: set[str] | None = None) -> list[dict]:
+    """Which shelf items a back-fill for ``person`` may touch.
+
+    Only items nobody has claimed yet: no person tag at all, or a leftover series from
+    the first cut of #12. An item already tagged with ANOTHER person is never touched,
+    whatever else is wrong with it. ``titles`` narrows to named items. This exists
+    because the first version matched "lacks this person's tag" and stamped one
+    person's name on everybody's files (2026-09-17).
+    """
+    out = []
+    for it in items:
+        if it["title"] == "Scribe voice samples":
+            continue
+        if titles is not None and it["title"] not in titles:
+            continue
+        owners = set(it["tags"]) & known_people
+        if owners and owners != {person}:
+            continue
+        if person in it["tags"] and not it["series"]:
+            continue
+        out.append(it)
+    return out
+
+
 def list_items(settings: Settings) -> list[dict]:
     """Every item in the Articles library (id, title, series, narrators, tags)."""
     library_id, _ = _library(settings)
