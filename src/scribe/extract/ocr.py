@@ -25,6 +25,58 @@ _FRAC = re.compile(r"\$?\\[dt]?frac\{([^{}]+)\}\{([^{}]+)\}\$?")
 _BARE_MATH = re.compile(r"\$([^$\n]{1,40})\$")
 
 
+# A repeated block this long is the model looping, not the page saying something
+# twice: a running header repeats, a paragraph of body text does not.
+_REPEAT_WINDOW = 160
+
+
+def collapse_repetition(text: str) -> tuple[str, bool]:
+    """Cut an OCR transcription at the point where it starts repeating itself.
+
+    Vision models loop: on 2026-09-16 glm-ocr transcribed a textbook page, then its
+    running header, then the whole page again, all under the token cap, and two
+    minutes of audio played twice (scribe#13). The generation-cap guard only catches
+    loops that overrun the cap. Here, if a 160-char window starting at some line
+    recurs later at a line start, everything from that second occurrence on is
+    dropped, plus one short line just before it (the running header that introduced
+    the loop). Returns (text, cut).
+    """
+    lines = text.split("\n")
+    norms = [" ".join(ln.split()) for ln in lines]
+    # Flat text and the flat offset at which each non-empty line begins.
+    offsets: dict[int, int] = {}
+    parts: list[str] = []
+    pos = 0
+    for i, n in enumerate(norms):
+        if not n:
+            continue
+        offsets[i] = pos
+        parts.append(n)
+        pos += len(n) + 1
+    flat = " ".join(parts)
+    if len(flat) < 2 * _REPEAT_WINDOW:
+        return text, False
+    starts = {off: i for i, off in offsets.items()}
+    for i, off in offsets.items():
+        probe = flat[off: off + _REPEAT_WINDOW]
+        if len(probe) < _REPEAT_WINDOW:
+            break
+        again = flat.find(probe, off + 1)
+        if again < 0:
+            continue
+        # The repeat begins at (or just inside) a later line: cut at that line.
+        cut = starts.get(again)
+        if cut is None:
+            later = [k for o, k in starts.items() if o <= again and k > i]
+            if not later:
+                continue
+            cut = max(later)
+        if cut > 0 and 0 < len(norms[cut - 1]) <= 60:
+            cut -= 1  # the running header that led the loop
+        return "\n".join(lines[:cut]).rstrip(), True
+    return text, False
+
+
 def normalize_latex(text: str) -> str:
     """Undo the LaTeX-isms glm-ocr introduces for ordinary typographic glyphs."""
     text = _FRAC.sub(r"\1/\2", text)
@@ -49,8 +101,12 @@ def ocr_image(settings: Settings, image: Image.Image) -> VisionResult:
     buf = io.BytesIO()
     prepared.save(buf, "PNG")
     result = generate_with_image(settings, PROMPT, buf.getvalue())
+    text, cut = collapse_repetition(result.text)
+    if cut:
+        log.warning("OCR output repeated itself; kept the first %d of %d chars",
+                    len(text), len(result.text))
     return VisionResult(
-        text=normalize_latex(result.text).strip(),
+        text=normalize_latex(text).strip(),
         seconds=result.seconds,
         complete=result.complete,
     )
