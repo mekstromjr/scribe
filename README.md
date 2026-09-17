@@ -130,9 +130,9 @@ Resolution order, narrowest first: your overrides, the shared overrides, environ
 code default. Overrides live in `config.json` beside the spool and hold only keys that
 were explicitly set, so a manifest change to an untouched key still takes effect.
 
-One cost to know about: Kokoro keeps every voice tensor it has served resident, so each
-distinct voice in regular use is memory for the life of the TTS server. Two or three is
-fine; the bot says so once when someone picks a voice other than the shared default.
+Voice choice is free. A Kokoro voice pack is about half a megabyte and loads only when a
+document is synthesized with it, so auditioning a dozen voices costs nothing; the memory
+that server uses is the model and its per-request leak, not voices.
 
 ## The listening script is rules, measured
 
