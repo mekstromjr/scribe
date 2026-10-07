@@ -31,6 +31,7 @@ import hashlib
 import io
 import logging
 import random
+import re
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -89,7 +90,9 @@ SCENE_FIELD = """\
 document's subject, for its cover illustration. Name physical objects, places or \
 landscapes from the content. Prefer objects and settings over people and animals. \
 Describe only what is seen: never mention titles, writing, words, labels, signs, \
-numbers or logos, and no art-style words."""
+numbers or logos, and no art-style words. For an abstract topic, show one symbolic place \
+or object (a lighthouse, a vault, an empty council chamber), never people holding \
+labelled things."""
 
 STYLE_FIELD = """\
 - "style": the art style that best suits the document, one of:
@@ -181,10 +184,64 @@ def plan(settings: Settings, summary: Summary, *,
     return CoverPlan(style, scene)
 
 
+# A 4B model sometimes ignores the no-lettering rule on abstract topics: the first real
+# drop asked for "figures ... holding signs labeled 'Evaluator', 'Democracy', and 'Global
+# Pact'", and SD-Turbo drew a sign reading "DEAVIFATANOR" (scribe#14). The negative
+# prompt is inert at cfg 1.0, so lettering is removed from the scene TEXT, by rule.
+_Q = r"""(?:'[^']*'|"[^"]*"|\u2018[^\u2019]*\u2019|\u201c[^\u201d]*\u201d)"""
+_QUOTED = re.compile(r"\s*" + _Q)
+# Any label verb, including ambiguous ones ("reading"), but ONLY when quoted text follows:
+# "a plaque reading 'Library'" goes, "a woman reading a book" stays.
+_LABEL_QUOTED = re.compile(
+    r"\s*\b(?:labell?ed|reading|reads|says|saying|titled|marked|inscribed\s+with|"
+    r"with\s+the\s+(?:words?|text))\s*" + _Q + r"(?:(?:\s*(?:,|and|or))+\s*" + _Q + r")*",
+    re.I)
+# Unambiguous label verbs take the unquoted text after them, up to punctuation.
+_LABEL_REST = re.compile(
+    r"\s*\b(?:labell?ed|titled|that\s+(?:says|reads)|inscribed\s+with|"
+    r"with\s+the\s+(?:words?|text))\b[^,.;]*", re.I)
+_LETTERING_NOUN = (r"(?:signs?|banners?|placards?|labels?|plaques?|posters?|captions?|"
+                   r"titles?|text|words?|letters?|lettering|inscriptions?|headlines?)")
+# The lettered prop itself: "holding signs", "under a banner", "displaying the title".
+_PROP_VERB = r"(?:holding|carrying|displaying|showing|bearing|with|under|beneath)"
+# Filler between the verb and the noun may not itself be a prop verb, so in "books with
+# pages under a banner" the match starts at "under", not at "with", and keeps the books.
+_PROP = re.compile(
+    r"\s*\b" + _PROP_VERB + r"\s+(?:(?!" + _PROP_VERB + r"\b)[\w-]+\s+){0,3}?"
+    + _LETTERING_NOUN + r"\b", re.I)
+
+
+def clean_scene(scene: str) -> str:
+    """Strip lettering from a scene: quoted strings, label phrases, lettered props."""
+    out = _LABEL_QUOTED.sub("", scene)
+    out = _QUOTED.sub("", out)
+    out = _LABEL_REST.sub("", out)
+    out = _PROP.sub("", out)
+    out = re.sub(r"\s+([,.;])", r"\1", out)        # " ," -> ","
+    out = re.sub(r"(?:,\s*){2,}", ", ", out)         # ", ," -> ","
+    out = re.sub(r"\s{2,}", " ", out)
+    return out.strip(" ,;")
+
+
+# Chapter titles scribe itself writes into every m4b; they say nothing about the content.
+_GENERIC_CHAPTERS = {"summary", "full article", "introduction", "contents"}
+
+
+def outline_summary(title: str, chapters: list[str], description: str = "") -> Summary:
+    """A stand-in Summary for an item made before covers existed (scribe#14 backfill).
+    The shelf kept no summary text, only the title, the chapter titles and the source,
+    so those are what plan() gets to read."""
+    meaningful = [c for c in chapters if c and c.strip().lower() not in _GENERIC_CHAPTERS]
+    body = "Chapters:\n" + "\n".join(f"- {c}" for c in meaningful) if meaningful else ""
+    if description:
+        body = f"Source: {description}\n\n{body}".strip()
+    return Summary(title=title, tldr="", summary=body)
+
+
 def build_prompt(scene: str, style: str, *, title: str = "") -> str:
     """Scene first, style last. With no scene (the plan call failed) the title is a
     weaker but still document-specific subject."""
-    subject = (scene or title or "an open book on a desk").strip().rstrip(".")
+    subject = (clean_scene(scene) or title or "an open book on a desk").strip().rstrip(".")
     return f"{subject}, {STYLES[style]}"
 
 

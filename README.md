@@ -260,6 +260,16 @@ new item that has none, so no extra API call is involved.
   the production settings (4 steps, full VAE).
 - **Best-effort, like the audio itself.** A dead image server, a timeout or a bad
   response costs the cover, logged; the audiobook ships without one.
+- **Lettering is removed by rule, not just asked for.** The negative prompt is inert at
+  SD-Turbo's cfg 1.0, and on abstract topics the text model still asks for "signs
+  labeled ..." now and then (the first production drop drew a sign reading nonsense).
+  `cover.clean_scene` strips quoted strings, label phrases and lettered props from the
+  scene before the image call, keeping ordinary verbs ("a woman reading a book").
+- **Older items: `scribe cover-backfill`.** Draws a cover for every shelf item that has
+  none and uploads it through the ABS API (the m4b files are left alone). The shelf keeps
+  no summary, so the scene is planned from the title and chapter titles. `--dry-run`
+  prints the plans, `--force` redoes items that already have a cover, `--title` limits it.
+  At ~1 min of planning plus ~2.5 min of drawing per item, run it detached in the pod.
 - **The badge is rebuilt, not cropped**: `scripts/make_badge.py` extracts the emblem from
   `assets/scribe-logo-minimalist.jpg` by colour and draws it on a fresh disk, writing
   `src/scribe/assets/scribe-badge.png`.
