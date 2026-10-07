@@ -39,12 +39,17 @@ class AudioResult:
 def produce_audio(
     settings: Settings, doc: Document, summary: Summary, *, title: str, author: str,
     abort: Callable[[], None] = lambda: None, person: str | None = None,
+    cover: Callable[[], bytes | None] | None = None,
 ) -> AudioResult:
     """Synthesize and package. Raises on failure — the caller decides how quiet to be.
 
     ``abort`` is called between segments; raising from it stops the synthesis at the
     next segment boundary (a cancel mid-audio). The current segment always finishes:
     Kokoro cannot be interrupted mid-request.
+
+    ``cover`` is called once, after synthesis and just before packaging: the image is
+    generated on another machine while Kokoro works, so by then it is usually done
+    (scribe#14). It returns JPEG bytes or None, and never raises.
     """
     chapters = build_script(doc, summary, max_chars=settings.tts_max_chars)
     # Non-fatal: a slightly noisy audiobook beats no audiobook. Each finding names the
@@ -70,10 +75,17 @@ def produce_audio(
                      chapter.title, si + 1, len(chapter.segments), secs)
         audio_chapters.append(ChapterAudio(chapter.title, files))
 
+    cover_path = None
+    jpeg = cover() if cover else None
+    if jpeg:
+        cover_path = work / "cover.jpg"
+        cover_path.write_bytes(jpeg)
+
     m4b = work / "audiobook.m4b"
     audio_seconds = build_m4b(
         audio_chapters, m4b, title=title, author=author, workdir=work,
         narrator=settings.tts_voice, grouping=person, comment=doc.source,
+        cover=cover_path,
     )
     return AudioResult(
         m4b=m4b,

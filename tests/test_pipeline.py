@@ -132,7 +132,36 @@ class TestHandoff:
         s = _settings(tmp_path)
         set_value(s, "tts_voice", "bm_george", user="U1")
         _, _, _, handed = self._run_summarize(tmp_path, monkeypatch, settings=s, user="U1")
-        assert handed[0].overrides == {"tts_voice": "bm_george", "tts_enabled": True}
+        # No cover_host in these settings, so the cover style freezes as "off".
+        assert handed[0].overrides == {"tts_voice": "bm_george", "tts_enabled": True,
+                                       "cover_style": "off"}
+
+    def test_handoff_freezes_a_concrete_cover_style(self, tmp_path, monkeypatch):
+        """scribe#14: the cover is planned in the summarize worker; the audio record
+        carries one real style name and the scene, so the audio worker never needs
+        ollama."""
+        from scribe import cover
+        from scribe.runtime_config import set_value
+
+        s = _settings(tmp_path, cover_host="http://sd.invalid")
+        set_value(s, "cover_style", "random", user="U1")
+        monkeypatch.setattr(cover, "chat_structured",
+                            lambda *a, **k: ({"scene": "a lighthouse"}, 1.0))
+        _, _, _, handed = self._run_summarize(tmp_path, monkeypatch, settings=s, user="U1")
+        assert handed[0].overrides["cover_style"] in cover.STYLES
+        assert handed[0].cover_scene == "a lighthouse"
+
+    def test_a_broken_cover_plan_never_costs_the_audio(self, tmp_path, monkeypatch):
+        from scribe import cover
+
+        def boom(*a, **k):
+            raise ValueError("ollama sent garbage")
+
+        s = _settings(tmp_path, cover_host="http://sd.invalid")
+        monkeypatch.setattr(cover, "chat_structured", boom)
+        _, _, _, handed = self._run_summarize(tmp_path, monkeypatch, settings=s)
+        assert len(handed) == 1, "audio still handed off"
+        assert handed[0].overrides["cover_style"] == cover.FALLBACK_STYLE
 
     def test_tts_off_means_no_audio_job(self, tmp_path, monkeypatch):
         s = _settings(tmp_path, tts_enabled=False)
@@ -159,6 +188,38 @@ class TestAudioWorker:
         slack_app._process_audio(s, _Client(), aj)
         assert seen["voice"] == "bm_george"
         assert restore_audio(s) == [], "completed even on failure; never requeued"
+
+    def _run_audio_capturing_cover(self, tmp_path, monkeypatch, **overrides):
+        """Run the audio worker with produce_audio stubbed; return what its cover
+        callable yielded and whether a cover was ever started."""
+        from scribe import cover
+
+        s = _settings(tmp_path, cover_host="http://sd.invalid")
+        started, seen = [], {}
+        monkeypatch.setattr(cover, "make_cover",
+                            lambda *a, **k: started.append(k["style"]) or b"\xff\xd8JPEG")
+
+        def fake_produce(settings, doc, summary, *, title, author, cover=None, **kw):
+            seen["cover"] = cover() if cover else None
+            raise RuntimeError("stop before upload")
+
+        monkeypatch.setattr(slack_app, "produce_audio", fake_produce)
+        aj = _audio_job(Job.new("C", "1", "t", "one"), **overrides)
+        aj.cover_scene = "a lighthouse"
+        enqueue_audio(s, aj)
+        slack_app._process_audio(s, _Client(), aj)
+        return seen.get("cover"), started
+
+    def test_frozen_style_cover_reaches_packaging(self, tmp_path, monkeypatch):
+        jpeg, started = self._run_audio_capturing_cover(tmp_path, monkeypatch,
+                                                        cover_style="woodcut")
+        assert started == ["woodcut"] and jpeg == b"\xff\xd8JPEG"
+
+    def test_pre_cover_records_get_no_cover_and_no_ollama(self, tmp_path, monkeypatch):
+        """A record spooled before scribe#14 has no frozen cover_style; the env default
+        (`auto`) is not a style, so the audio worker must not try to resolve it."""
+        jpeg, started = self._run_audio_capturing_cover(tmp_path, monkeypatch)
+        assert started == [] and jpeg is None
 
     def test_cancel_while_waiting_in_audio_spool(self, tmp_path, monkeypatch):
         s = _settings(tmp_path)

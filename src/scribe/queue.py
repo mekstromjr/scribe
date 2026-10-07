@@ -86,6 +86,9 @@ class AudioJob:
     # Sender's display name, for the shelf's series/tag (scribe#12). Resolved at
     # hand-off so the audio worker never calls Slack.
     person: str | None = None
+    # The cover's subject, described by the text model at hand-off (scribe#14); the
+    # concrete style rides in `overrides` as cover_style. Empty in older records.
+    cover_scene: str = ""
 
 
 def spool(settings: Settings) -> Path:

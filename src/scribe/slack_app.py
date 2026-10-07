@@ -24,6 +24,7 @@ import httpx
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
+from scribe import cover as covers
 from scribe.abs import ABSError, upload
 from scribe.audio import produce_audio
 from scribe.calibration import Calibration
@@ -63,6 +64,8 @@ HELP_TEXT = (
     "I extract the text, write a thorough summary, and reply in thread with the TL;DR "
     "plus the full note as a file (PDF by default; `/scribeformat` picks pdf, md, docx, "
     "or none).\n\n"
+    "Each document also becomes an audiobook with its own cover art. `/scribevoice` picks "
+    "the voice and `/scribecover` the cover style.\n\n"
     "Documents are processed one at a time and a long article takes several minutes — "
     "I'll tell you where you are in the queue.\n\n"
     "Sent something by mistake? Reply *cancel* in its thread and I'll stop."
@@ -239,10 +242,32 @@ def _audio_stage(settings: Settings, client, job, doc, summary,
     """
     title = note_title(doc, summary)
     author = doc.source if doc.kind == "link" else "scribe"
+    # Started before synthesis so the image server works while Kokoro does (scribe#14).
+    # cover_style here is the CONCRETE style frozen at hand-off; a record spooled before
+    # scribe#14 carries none, falls back to the env value (`auto`, not a style), and
+    # simply gets no cover rather than an ollama call from this worker.
+    cover_future = None
+    if settings.cover_host and settings.cover_style in covers.STYLES:
+        cover_future = covers.submit(settings, scene=getattr(job, "cover_scene", ""),
+                                     style=settings.cover_style,
+                                     seed=covers.seed_for(job.id), title=title)
+    # Time spent blocked on the cover is not synthesis. On a short document the cover
+    # can outlast Kokoro, and counting that wait would teach the audio calibration
+    # (scribe#8) that synthesis got slower.
+    cover_wait = 0.0
+
+    def cover_jpeg() -> bytes | None:
+        nonlocal cover_wait
+        w0 = time.monotonic()
+        jpeg = covers.wait(cover_future, settings.cover_timeout_seconds)
+        cover_wait = time.monotonic() - w0
+        return jpeg
+
     t0 = time.monotonic()
     try:
-        result = produce_audio(settings, doc, summary, title=title, author=author,
-                               abort=abort, person=person)
+        result = produce_audio(
+            settings, doc, summary, title=title, author=author, abort=abort, person=person,
+            cover=cover_jpeg)
     except JobCanceled:
         raise
     except Exception as exc:
@@ -253,7 +278,7 @@ def _audio_stage(settings: Settings, client, job, doc, summary,
             text=f"_(No audio this time — synthesis failed: {exc})_",
         )
         return None
-    synth_wall = time.monotonic() - t0
+    synth_wall = time.monotonic() - t0 - cover_wait
 
     with result.workdir:
         minutes = result.audio_seconds / 60
@@ -401,6 +426,12 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
                 script_chars = len(doc.text) + len(summary.summary)
             audio_raw = audio_seconds(settings, script_chars)
 
+        # The cover is planned BEFORE anything is posted (scribe#14): it is a model call,
+        # and a restart during it should redo the job silently, not post the TL;DR twice.
+        # Decided here, in the worker that owns ollama, so the audio worker never calls
+        # it. Never raises.
+        plan = covers.plan(settings, summary) if audio_on else covers.CoverPlan(covers.OFF)
+
         # Past here the TL;DR is posted and cancel would confuse more than it saves.
         abort()
         lines = [
@@ -446,11 +477,12 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
                     id=job.id, channel=job.channel, thread_ts=job.thread_ts,
                     source_label=job.source_label, user=job.user,
                     doc=doc.model_dump(mode="json"), summary=summary.model_dump(mode="json"),
-                    # The sender's resolved TTS settings, frozen at hand-off.
+                    # The sender's resolved TTS and cover settings, frozen at hand-off.
                     overrides={"tts_voice": settings.tts_voice,
-                               "tts_enabled": settings.tts_enabled},
+                               "tts_enabled": settings.tts_enabled,
+                               "cover_style": plan.style},
                     script_chars=script_chars, predicted_raw=audio_raw,
-                    person=person,
+                    person=person, cover_scene=plan.scene,
                 )
                 enqueue_audio(settings, audio_job)
                 audio_submit(audio_job)
@@ -669,6 +701,20 @@ def _voice_menu(settings: Settings, available: list[str], current: str) -> str:
     return "\n".join(lines)
 
 
+def _cover_choices() -> str:
+    return ("Options: `auto` (the model picks a style to suit the document), `random`, "
+            + ", ".join(f"`{s}`" for s in covers.STYLES) + ", or `off`.")
+
+
+def _cover_menu(current: str) -> str:
+    """The no-argument /scribecover reply."""
+    lines = [f"Your cover style: *{current}*", _cover_choices()]
+    for name, fragment in covers.STYLES.items():
+        lines.append(f"• `{name}`: {fragment.split(',')[0]}")
+    lines.append("Add `default` to change the shared default instead.")
+    return "\n".join(lines)
+
+
 def _register_config_commands(app: App, settings: Settings) -> None:
     """Slash commands for on-the-fly configuration (scribe#2, per-user in scribe#6).
 
@@ -682,7 +728,7 @@ def _register_config_commands(app: App, settings: Settings) -> None:
     def _state_line(s: Settings) -> str:
         return (
             f"voice *{s.tts_voice}* · note *{s.note_format}* · "
-            f"TTS *{'on' if s.tts_enabled else 'off'}*"
+            f"TTS *{'on' if s.tts_enabled else 'off'}* · cover *{s.cover_style}*"
         )
 
     def _scope(command) -> tuple[str, str | None, str]:
@@ -762,6 +808,29 @@ def _register_config_commands(app: App, settings: Settings) -> None:
         after = effective(settings, user)
         respond(f"Notes will be delivered as *{wanted}* {scope} from the next document. "
                 f"{_state_line(after)}{_both_off_note(after)}")
+
+    @app.command("/scribecover")
+    def on_cover(ack, respond, command):
+        """Pick the cover-art style (scribe#14): a named style, `auto`, `random`, or `off`."""
+        ack()
+        wanted, user, scope = _scope(command)
+        wanted = wanted.strip().lower()
+        current = effective(settings, user)
+        if not wanted:
+            respond(_cover_menu(current.cover_style))
+            return
+        if wanted not in covers.CHOICES:
+            respond(f"`{wanted}` is not a cover style. {_cover_choices()}")
+            return
+        set_value(settings, "cover_style", wanted, user=user)
+        after = effective(settings, user)
+        note = ""
+        if not after.cover_host:
+            note = "\n_Cover art is not enabled on this server, so this applies once it is._"
+        elif not after.tts_enabled:
+            note = "\n_Covers ride on the audiobook, and your TTS is off (`/scribetoggletts`)._"
+        respond(f"Cover style set to *{wanted}* {scope} from the next document. "
+                f"{_state_line(after)}{note}")
 
     @app.command("/scribetoggletts")
     def on_toggle_tts(ack, respond, command):

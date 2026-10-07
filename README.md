@@ -120,7 +120,7 @@ the models it serves, and fails if the expected models are missing.
 
 ## Runtime settings are per person
 
-`/scribevoice`, `/scribeformat` and `/scribetoggletts` change the settings of whoever
+`/scribevoice`, `/scribeformat`, `/scribecover` and `/scribetoggletts` change the settings of whoever
 runs them, keyed by Slack user id, and each document is processed under its sender's
 settings. Nobody has to fight over the voice. Append `default` to a command to change
 the shared layer everyone falls back to instead; `/scribeconfig` shows your settings,
@@ -232,6 +232,38 @@ last one's m4b is still being made.
 - **Cancel still finds it.** Both halves register under the same id, so "cancel" in the
   thread drops a waiting audio job, or stops a running one at its next segment.
 
+## Cover art
+
+Every audiobook gets a cover drawn for it (scribe#14): a 512x512 image from a
+[stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) `sd-server`
+running SD-Turbo, with the scribe badge in the bottom-right corner. It is embedded in the
+m4b as an attached picture, and Audiobookshelf's scanner takes an embedded cover for any
+new item that has none, so no extra API call is involved.
+
+- **The subject comes from the document.** At hand-off, one short text-model call reads
+  the finished summary (title, TL;DR, tags, body) and describes a single concrete scene.
+  It steers toward objects and places and away from any lettering, because SD-Turbo
+  cannot spell and draws people and animals badly. The scene is deliberately NOT a field
+  of the summary request: adding one there shifted the summaries themselves (one article's
+  summary came out a third shorter), and the summary is the product.
+- **The style is a per-person setting**, like the voice. `/scribecover` takes `flat`,
+  `storybook`, `painterly`, `watercolor`, `woodcut` or `poster`; `random`; `off`; or
+  `auto` (the default), where that same call also picks the style that suits the
+  document.
+- **Everything is decided at hand-off**, in the summarize worker, and frozen into the
+  audio spool record with the voice: the scene and one concrete style. The audio worker
+  never calls the text model, and a job resumed after a restart keeps the cover it was
+  given. The seed is derived from the job id, so a resumed job draws the same image.
+- **It costs no wall clock on a normal document.** The image is generated on a separate
+  machine while Kokoro synthesizes, and the m4b waits for it only at packaging time.
+  Time spent waiting is excluded from the audio calibration. One cover measured 143 s at
+  the production settings (4 steps, full VAE).
+- **Best-effort, like the audio itself.** A dead image server, a timeout or a bad
+  response costs the cover, logged; the audiobook ships without one.
+- **The badge is rebuilt, not cropped**: `scripts/make_badge.py` extracts the emblem from
+  `assets/scribe-logo-minimalist.jpg` by colour and draws it on a fresh disk, writing
+  `src/scribe/assets/scribe-badge.png`.
+
 ## Note delivery
 
 The full note is posted into the Slack thread as a file, right after the TL;DR reply, in
@@ -303,6 +335,10 @@ All settings are env-overridable with the `SCRIBE_` prefix (see `src/scribe/conf
 | `SCRIBE_MAX_OCR_PAGES` | `0` (unlimited) | Skipped pages are recorded, not silently dropped |
 | `SCRIBE_OCR_NUM_PREDICT` | `3000` | Generation cap per OCR page; hitting it skips the page (runaway guard) |
 | `SCRIBE_OCR_TIMEOUT_SECONDS` | `900` | Per-page OCR deadline, separate from the summarization timeout; must exceed cap / slowest tok/s |
+| `SCRIBE_COVER_HOST` | *(empty: covers off)* | sd-server base URL for cover art, e.g. `http://diffusion.meklab.net:1234` |
+| `SCRIBE_COVER_STYLE` | `auto` | Shared default cover style; `/scribecover` overrides per person |
+| `SCRIBE_COVER_STEPS` | `4` | SD-Turbo sampling steps (1-4) |
+| `SCRIBE_COVER_TIMEOUT_SECONDS` | `600` | How long packaging waits for a cover before shipping without one |
 | `SCRIBE_NOTE_FORMAT` | `pdf` | How the full note is delivered in-thread: `pdf`, `md`, `docx`, `none`; `/scribeformat` overrides at runtime |
 | `SCRIBE_SLACK_BOT_TOKEN` | *(none)* | `xoxb-` from installing the app |
 | `SCRIBE_SLACK_APP_TOKEN` | *(none)* | `xapp-` with `connections:write`, for Socket Mode |

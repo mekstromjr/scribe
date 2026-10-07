@@ -167,6 +167,28 @@ class Settings(BaseSettings):
     # audio) synthesizes in ~3 min; 15 min means something is actually wrong.
     tts_timeout_seconds: float = 900.0
 
+    # --- Cover art (scribe#14) ------------------------------------------------------
+    # A stable-diffusion.cpp sd-server (A1111-style /sdapi/v1/txt2img) draws a cover for
+    # each audiobook from the summary's cover_scene; it is embedded in the m4b, where
+    # Audiobookshelf's scanner picks it up as the item cover. Empty = covers off.
+    # Production: http://diffusion.meklab.net:1234 (no authentication on the server, so
+    # it only admits the cluster nodes; see meklab/home container-services/diffusion).
+    # Best-effort like the audio itself: a failed cover costs the cover, never the job.
+    cover_host: str = ""
+
+    # The shared default; users pick their own with /scribecover. A concrete style name
+    # from cover.STYLES, or "auto" (the text model picks one from the summary), "random",
+    # or "off".
+    cover_style: str = "auto"
+
+    # SD-Turbo is distilled for 1-4 steps. 4 measured cleaner than 1 and costs ~1.5 min
+    # more per cover (Phase 0, scribe#14), which is noise against an hour-long job.
+    cover_steps: int = 4
+
+    # One cover measured 143 s end to end (4 steps, full VAE on the server's CPU). The
+    # m4b waits for the cover, so this caps how long a fast synthesis can be held up.
+    cover_timeout_seconds: float = 600.0
+
     # In-cluster API endpoint vs the public link put in notes and Slack replies. The
     # API talks service-to-service; the link must open on a phone.
     abs_api_url: str = "http://audiobookshelf.prod.svc.cluster.local:80"
