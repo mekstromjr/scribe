@@ -69,8 +69,9 @@ class TestSafety:
         config_path(settings).write_text(json.dumps({"tts_voice": "af_sky", "evil": 1}))
         assert load(settings) == {"tts_voice": "af_sky"}
 
-    def test_allowlist_is_exactly_the_three_toggles(self):
-        assert sorted(ALLOWED_KEYS) == ["note_format", "tts_enabled", "tts_voice"]
+    def test_allowlist_is_exactly_the_four_settings(self):
+        assert sorted(ALLOWED_KEYS) == ["cover_style", "note_format", "tts_enabled",
+                                        "tts_voice"]
 
 
 class TestPerUser:

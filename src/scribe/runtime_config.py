@@ -31,7 +31,7 @@ log = logging.getLogger("scribe.runtime_config")
 
 # Only these may be set from chat. An allowlist, not an open key/value store: a typo'd
 # key would otherwise sit in the file looking authoritative and doing nothing.
-ALLOWED_KEYS = {"tts_voice", "tts_enabled", "note_format"}
+ALLOWED_KEYS = {"tts_voice", "tts_enabled", "note_format", "cover_style"}
 
 # Reserved top-level key holding the per-user map. Not an allowed setting name, so it can
 # never collide with one.

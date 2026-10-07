@@ -24,6 +24,12 @@
         "should_escape": false
       },
       {
+        "command": "/scribecover",
+        "description": "Choose the audiobook cover-art style, or list the styles",
+        "usage_hint": "[auto|random|flat|storybook|painterly|watercolor|woodcut|poster|off]",
+        "should_escape": false
+      },
+      {
         "command": "/scribetoggletts",
         "description": "Turn TTS audio generation on or off",
         "usage_hint": "[on|off]",
