@@ -266,7 +266,7 @@ def _audio_stage(settings: Settings, client, job, doc, summary,
     t0 = time.monotonic()
     try:
         result = produce_audio(
-            settings, doc, summary, title=title, author=author, abort=abort, person=person,
+            settings, doc, summary, title=title, author=author, abort=abort,
             cover=cover_jpeg)
     except JobCanceled:
         raise
