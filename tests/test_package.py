@@ -64,3 +64,29 @@ class TestBuildM4b:
         # MP4 container magic: 'ftyp' at byte 4.
         assert out.read_bytes()[4:8] == b"ftyp"
         assert out.stat().st_size > 1000
+
+    @pytest.mark.skipif(shutil.which("ffprobe") is None, reason="ffmpeg not installed")
+    def test_cover_is_embedded_as_an_attached_picture(self, tmp_path):
+        """scribe#14: Audiobookshelf only extracts a cover that is an attached_pic stream,
+        and the chapters must survive the extra input shifting nothing."""
+        import json
+        import subprocess
+
+        from PIL import Image
+
+        a = _write_wav(tmp_path / "a.wav", 1.0)
+        b = _write_wav(tmp_path / "b.wav", 1.0)
+        cover = tmp_path / "cover.jpg"
+        Image.new("RGB", (64, 64), (200, 30, 30)).save(cover, "JPEG")
+        out = tmp_path / "out.m4b"
+        build_m4b([ChapterAudio("Summary", [a]), ChapterAudio("Full article", [b])],
+                  out, title="T", author="scribe", workdir=tmp_path, cover=cover)
+
+        probe = json.loads(subprocess.run(
+            ["ffprobe", "-v", "error", "-show_streams", "-show_chapters", "-of", "json",
+             str(out)], check=True, capture_output=True, text=True).stdout)
+        kinds = [s["codec_type"] for s in probe["streams"]]
+        assert kinds.count("audio") == 1
+        video = [s for s in probe["streams"] if s["codec_type"] == "video"]
+        assert len(video) == 1 and video[0]["disposition"]["attached_pic"] == 1
+        assert [c["tags"]["title"] for c in probe["chapters"]] == ["Summary", "Full article"]
