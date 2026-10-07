@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from scribe import abs as abs_mod
@@ -118,3 +119,38 @@ class TestUpload:
         m4b.write_bytes(b"x")
         link = upload(settings, m4b, title="Unscanned", author="scribe")
         assert link == f"{settings.abs_web_url}/library/lib-art"
+
+
+class TestCoverHelpers:
+    """scribe#14 backfill: read an item's outline, upload a cover."""
+
+    def test_item_info_reads_cover_path_and_chapters(self, monkeypatch):
+        def fake_get(url, headers, params, timeout):
+            assert url.endswith("/api/items/i1") and params == {"expanded": 1}
+            return httpx.Response(200, request=httpx.Request("GET", url), json={"media": {
+                "coverPath": "", "metadata": {"title": "T", "description": "src"},
+                "chapters": [{"title": "Summary"}, {"title": "Mergesort"}]}})
+
+        monkeypatch.setattr(abs_mod.httpx, "get", fake_get)
+        info = abs_mod.item_info(Settings(abs_token="t"), "i1")
+        assert info == {"title": "T", "description": "src", "cover_path": "",
+                        "chapters": ["Summary", "Mergesort"]}
+
+    def test_set_cover_posts_the_multipart_field_abs_reads(self, monkeypatch):
+        seen = {}
+
+        def fake_post(url, headers, files, timeout):
+            seen["url"], seen["files"] = url, files
+            return httpx.Response(200, request=httpx.Request("POST", url), json={"success": True})
+
+        monkeypatch.setattr(abs_mod.httpx, "post", fake_post)
+        abs_mod.set_cover(Settings(abs_token="t"), "i1", b"\xff\xd8jpeg")
+        assert seen["url"].endswith("/api/items/i1/cover")
+        name, data, ctype = seen["files"]["cover"]
+        assert data == b"\xff\xd8jpeg" and ctype == "image/jpeg"
+
+    def test_set_cover_failure_is_an_abs_error(self, monkeypatch):
+        monkeypatch.setattr(abs_mod.httpx, "post", lambda url, **k: httpx.Response(
+            403, request=httpx.Request("POST", url)))
+        with pytest.raises(abs_mod.ABSError):
+            abs_mod.set_cover(Settings(abs_token="t"), "i1", b"x")

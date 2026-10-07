@@ -170,6 +170,67 @@ def _cmd_abs_backfill(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_cover_backfill(args: argparse.Namespace) -> int:
+    """Give shelf items made before covers existed a cover of their own (scribe#14).
+
+    Plans each from the item's title and chapter titles (the shelf keeps no summary),
+    generates it, and uploads it through the ABS API; the m4b files are not touched.
+    Items that already have a cover are skipped, so a re-run only fills gaps. One item's
+    failure is reported and skipped, never fatal to the rest.
+    """
+    from scribe import cover
+    from scribe.abs import ABSError, item_info, list_items, set_cover
+
+    settings = load_settings()
+    if args.style:
+        settings = settings.model_copy(update={"cover_style": args.style})
+    if not settings.cover_host:
+        print("SCRIBE_COVER_HOST is not set; nothing to draw with", file=sys.stderr)
+        return 2
+    items = list_items(settings)
+    if args.title:
+        items = [it for it in items if it["title"] in set(args.title)]
+    done = skipped = failed = 0
+    print(f"# {len(items)} item(s), style={settings.cover_style}", file=sys.stderr, flush=True)
+    for it in items:
+        try:
+            info = item_info(settings, it["id"])
+        except ABSError as exc:
+            print(f"FAIL  {it['title']!r}: {exc}", flush=True)
+            failed += 1
+            continue
+        if info["cover_path"] and not args.force:
+            print(f"skip  {it['title']!r}: already has a cover", flush=True)
+            skipped += 1
+            continue
+        summary = cover.outline_summary(info["title"] or it["title"], info["chapters"],
+                                        info["description"])
+        plan = cover.plan(settings, summary)
+        if plan.style == cover.OFF:
+            print("cover style is off; nothing to do", file=sys.stderr)
+            return 2
+        prompt = cover.build_prompt(plan.scene, plan.style, title=summary.title)
+        if args.dry_run:
+            print(f"plan  {it['title']!r}\n      {plan.style}: {prompt}", flush=True)
+            continue
+        jpeg = cover.make_cover(settings, scene=plan.scene, style=plan.style,
+                                seed=cover.seed_for(it["id"]), title=summary.title)
+        if not jpeg:
+            print(f"FAIL  {it['title']!r}: no image", flush=True)
+            failed += 1
+            continue
+        try:
+            set_cover(settings, it["id"], jpeg)
+        except ABSError as exc:
+            print(f"FAIL  {it['title']!r}: {exc}", flush=True)
+            failed += 1
+            continue
+        print(f"done  {it['title']!r} ({plan.style})", flush=True)
+        done += 1
+    print(f"# done={done} skipped={skipped} failed={failed}", file=sys.stderr, flush=True)
+    return 1 if failed else 0
+
+
 def _cmd_calibration(args: argparse.Namespace) -> int:  # noqa: ARG001
     """Learned per-stage ETA factors (scribe#8), from the runtime config beside the spool."""
     import json
@@ -372,6 +433,14 @@ def main() -> int:
     p_bf.add_argument("--title", action="append", help="only this title (repeatable)")
     p_bf.add_argument("--dry-run", action="store_true")
     p_bf.set_defaults(func=_cmd_abs_backfill)
+
+    p_cb = sub.add_parser("cover-backfill",
+                          help="draw and upload covers for shelf items that have none")
+    p_cb.add_argument("--style", help="override the cover style (default: SCRIBE_COVER_STYLE)")
+    p_cb.add_argument("--title", action="append", help="only this title (repeatable)")
+    p_cb.add_argument("--force", action="store_true", help="redo items that have a cover")
+    p_cb.add_argument("--dry-run", action="store_true", help="plan and print, draw nothing")
+    p_cb.set_defaults(func=_cmd_cover_backfill)
 
     p_cal = sub.add_parser("calibration", help="show the learned ETA correction factors")
     p_cal.set_defaults(func=_cmd_calibration)
