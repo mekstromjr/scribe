@@ -168,6 +168,39 @@ def list_items(settings: Settings) -> list[dict]:
         page += 1
 
 
+def item_info(settings: Settings, item_id: str) -> dict:
+    """Title, cover path, chapter titles and description of one item (scribe#14
+    backfill). The shelf keeps no summary text, so chapters carry most of an item's
+    meaning when its title is a bare filename."""
+    try:
+        resp = httpx.get(f"{settings.abs_api_url}/api/items/{item_id}",
+                         headers=_headers(settings), params={"expanded": 1}, timeout=30.0)
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise ABSError(f"cannot read Audiobookshelf item {item_id}: {exc}") from exc
+    media = resp.json().get("media") or {}
+    meta = media.get("metadata") or {}
+    return {
+        "title": meta.get("title") or "",
+        "description": meta.get("description") or "",
+        "cover_path": media.get("coverPath") or "",
+        "chapters": [c.get("title") or "" for c in media.get("chapters") or []],
+    }
+
+
+def set_cover(settings: Settings, item_id: str, jpeg: bytes) -> None:
+    """Upload a cover for an existing item (multipart field ``cover``). New items get
+    theirs from the m4b's embedded picture instead; this is for items made before
+    covers existed, whose m4b has none and is not worth re-encoding on the FUSE mount."""
+    try:
+        httpx.post(f"{settings.abs_api_url}/api/items/{item_id}/cover",
+                   headers=_headers(settings),
+                   files={"cover": ("cover.jpg", jpeg, "image/jpeg")},
+                   timeout=60.0).raise_for_status()
+    except httpx.HTTPError as exc:
+        raise ABSError(f"cover upload failed for item {item_id}: {exc}") from exc
+
+
 def upload(settings: Settings, m4b: Path, *, title: str, author: str,
            narrator: str | None = None, collection: str | None = None,
            tags: list[str] | None = None, description: str | None = None) -> str:

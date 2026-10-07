@@ -207,3 +207,60 @@ class TestMakeCoverNeverRaises:
 
     def test_wait_on_no_future_is_none(self):
         assert cover.wait(None, 1) is None
+
+
+class TestCleanScene:
+    """scribe#14: lettering is removed from the scene text by rule, because the negative
+    prompt is inert at cfg 1.0. Cases are real scenes from the first production runs."""
+
+    def test_the_first_production_drop(self):
+        scene = ("A futuristic server room where rows of glowing servers emit streams of data "
+                 "that form a chaotic swarm of digital agents attacking a locked gate "
+                 "representing safety protocols, while three distinct figures stand at the "
+                 "entrance holding signs labeled 'Evaluator', 'Democracy', and 'Global Pact' "
+                 "to block the swarm.")
+        out = cover.clean_scene(scene)
+        assert out.endswith("stand at the entrance to block the swarm.")
+        for word in ("sign", "label", "Evaluator", "Democracy", "Global Pact", "'"):
+            assert word not in out
+
+    def test_a_displayed_title(self):
+        out = cover.clean_scene("A parchment scroll unrolling on a wooden desk, displaying the "
+                                "title 'Federalist No. 10' alongside ink sketches of a map.")
+        assert out == ("A parchment scroll unrolling on a wooden desk, alongside ink sketches "
+                       "of a map.")
+
+    def test_a_plaque_reading_quoted_text(self):
+        out = cover.clean_scene('A wooden door with a brass plaque reading "Library" at the '
+                                'end of a long hallway.')
+        assert out == "A wooden door at the end of a long hallway."
+
+    def test_unquoted_text_after_an_unambiguous_label_verb(self):
+        assert cover.clean_scene("A desk with books under a banner that says Welcome, lit by "
+                                 "a lamp.") == "A desk with books, lit by a lamp."
+
+    def test_reading_a_book_is_not_lettering(self):
+        s = "An old woman reading a book by a window."
+        assert cover.clean_scene(s) == s
+
+    def test_a_clean_scene_is_untouched(self):
+        s = ("A towering cylindrical masonry lighthouse stands on a rugged rocky coastline with "
+             "the first-order Fresnel lens glowing brightly against a twilight sky.")
+        assert cover.clean_scene(s) == s
+
+    def test_build_prompt_applies_it(self):
+        p = cover.build_prompt("A gate with a sign reading 'Keep Out'.", "flat")
+        assert "Keep Out" not in p and "sign" not in p
+
+
+class TestOutlineSummary:
+    def test_generic_chapters_are_dropped_and_real_ones_kept(self):
+        chapters = ["Summary", "Full article", "Introduction", "Tower of Hanoi", "Mergesort"]
+        s = cover.outline_summary("01-recursion", chapters, "01-recursion.pdf")
+        assert s.title == "01-recursion"
+        assert "- Tower of Hanoi" in s.summary and "- Mergesort" in s.summary
+        assert "Full article" not in s.summary and "- Summary" not in s.summary
+        assert s.summary.startswith("Source: 01-recursion.pdf")
+
+    def test_no_chapters_no_body(self):
+        assert cover.outline_summary("Title", ["Summary"]).summary == ""
