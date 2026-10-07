@@ -147,9 +147,10 @@ with the person's first name (from their Slack profile) and gets a **tag** with 
 voice id becomes the **narrator**, and the source URL or filename the description. A
 collection rather than a series because a series is one ordered work and a collection is
 a named shelf of unrelated items, with its own tab in the library. The voice and person
-are also written into the file's tags (composer, grouping, comment), and everything is
-set through the API once the scan finds the item, so it holds regardless of what the
-scanner read. Items from before this existed were back-filled with
+are written through the API once the scan finds the item; the file's own tags carry only
+the voice (composer) and source (comment). Not `grouping`: Audiobookshelf reads that as a
+fallback series tag, and writing the person there filed every item into a per-person
+series until it was dropped. Items from before this existed were back-filled with
 `scribe abs-backfill --person <Name>`.
 
 ## The listening script is rules, measured

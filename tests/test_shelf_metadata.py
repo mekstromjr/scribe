@@ -84,9 +84,12 @@ class TestM4bTags:
         wav.write_bytes(b"RIFF")
         package.build_m4b([package.ChapterAudio("c", [wav])], tmp_path / "o.m4b", title="T",
                           author="A", workdir=tmp_path, narrator="bm_george",
-                          grouping="Michael", comment="https://x")
+                          comment="https://x")
         cmd = seen["cmd"]
-        assert "composer=bm_george" in cmd and "grouping=Michael" in cmd
+        assert "composer=bm_george" in cmd
+        # Never a grouping tag: Audiobookshelf maps it to series (it filed every item into
+        # a per-person series until this was dropped).
+        assert not any(str(a).startswith("grouping=") for a in cmd)
         assert "comment=https://x" in cmd
 
 
