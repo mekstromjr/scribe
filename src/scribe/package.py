@@ -77,6 +77,7 @@ def build_m4b(
     narrator: str | None = None,
     grouping: str | None = None,
     comment: str | None = None,
+    cover: Path | None = None,
 ) -> float:
     """Concat + encode. Returns total audio seconds.
 
@@ -88,6 +89,9 @@ def build_m4b(
     Mono 64k AAC: Kokoro output is 24 kHz mono speech, where 64 kbps is transparent —
     a 45-minute article lands around 22 MB instead of the ~120 MB stereo-bitrate
     default.
+
+    ``cover`` (a JPEG) becomes an attached picture stream. Audiobookshelf extracts an
+    embedded cover for a new item that has none (scribe#14), and other players show it.
     """
     files = [f for ch in chapters for f in ch.files]
     if not files:
@@ -106,7 +110,13 @@ def build_m4b(
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-f", "concat", "-safe", "0", "-i", str(concat),
         "-i", str(meta),
+        # Input 2 when present. Inputs 0 and 1 keep their indices either way, so the
+        # metadata/chapter mapping below does not depend on whether there is a cover.
+        *(["-i", str(cover)] if cover else []),
         "-map_metadata", "1", "-map_chapters", "1",
+        "-map", "0:a",
+        *(["-map", "2:v", "-c:v", "copy", "-disposition:v:0", "attached_pic"]
+          if cover else []),
         "-c:a", "aac", "-b:a", "64k", "-ac", "1",
         # album = title, deliberately: Audiobookshelf's audiobook scanner takes the
         # ALBUM tag as the book title (verified 2026-08-27 — a fixed album string
