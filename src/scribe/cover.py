@@ -1,8 +1,9 @@
 """Cover art for the audiobook (scribe#14).
 
 A stable-diffusion.cpp sd-server draws one 512x512 image per document, of a scene the
-text model describes from the finished summary, in the sender's chosen style, and the
-scribe badge is stamped in the bottom-right corner. The JPEG is embedded in the m4b, and
+text model describes from the finished summary, in the sender's chosen style. The
+title is printed across the top on a translucent panel (scribe#15) and the scribe badge
+is stamped in the bottom-right corner. The JPEG is embedded in the m4b, and
 Audiobookshelf's scanner extracts an embedded cover for any new item that has none, so no
 ABS API call is needed.
 
@@ -39,7 +40,7 @@ from functools import lru_cache
 from importlib.resources import files
 
 import httpx
-from PIL import Image, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from scribe.config import Settings
 from scribe.ollama import chat_structured
@@ -80,6 +81,19 @@ SAMPLER = "euler_a"
 # Badge placement, chosen against light, dark and busy test covers (scribe#14).
 BADGE_FRACTION = 0.14
 MARGIN_FRACTION = 0.03
+
+# Title panel across the top (scribe#15): drawn by Pillow, never by the model, so it is
+# always spelled right. Top, because the badge owns the bottom-right corner. Sizes are
+# fractions of the cover width; the font shrinks from MAX to MIN before it truncates.
+TITLE_FONT = "assets/IBMPlexSans-SemiBold.ttf"
+TITLE_MAX_LINES = 3
+TITLE_MAX_FRACTION = 0.072
+TITLE_MIN_FRACTION = 0.045
+TITLE_LINE_HEIGHT = 1.22      # x font size
+TITLE_PAD_FRACTION = 0.028    # panel padding around the text
+TITLE_RADIUS_FRACTION = 0.03
+PANEL_RGBA = (14, 16, 20, 150)   # near-black at ~59%: readable on white, scene shows through
+TITLE_RGB = (246, 243, 236)
 
 # The model reads the summary, not the document: it is plenty for a scene, and keeps the
 # prompt-eval cost of this call to a fraction of the summary's own.
@@ -277,14 +291,124 @@ def _badge() -> Image.Image:
         return Image.open(fh).convert("RGBA")
 
 
-def watermark(png: bytes) -> bytes:
-    """Stamp the badge bottom-right with a soft shadow; return a baseline JPEG.
+# A page <title> usually ends in the site's name ("Lighthouse - Wikipedia"). Only the
+# LAST separator counts, and only when what follows is short, so "Part 1 - Origins:
+# A History of the Lighthouse" keeps its subtitle. Pipe and plain hyphen only: an em
+# dash commonly separates "Author — Essay Title", where the short tail IS the title.
+_SITE_SUFFIX = re.compile(r"^(?P<head>.{3,})\s+[|-]\s+(?P<tail>[^|]+)$")
+_SITE_SUFFIX_MAX_WORDS = 3
+
+
+def cover_title(title: str, *, strip_site: bool = False) -> str:
+    """The title as printed on the cover: underscores and whitespace tidied, and for a
+    web page (``strip_site``) the site-name suffix dropped; only an HTML <title> carries
+    one, and a PDF's "Lecture 5 - Dynamic Programming" must keep its subtitle.
+    The shelf title is untouched; this is display only."""
+    # Filename-stem titles ("Notes_on_logic") read better spaced out.
+    out = re.sub(r"[\s_]+", " ", title or "").strip()
+    m = _SITE_SUFFIX.match(out) if strip_site else None
+    if m and len(m["tail"].split()) <= _SITE_SUFFIX_MAX_WORDS:
+        out = m["head"].strip()
+    return out
+
+
+@lru_cache(maxsize=1)
+def _font_bytes() -> bytes:
+    return files("scribe").joinpath(TITLE_FONT).read_bytes()
+
+
+@lru_cache(maxsize=64)
+def _font(size: int) -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(io.BytesIO(_font_bytes()), size)
+
+
+def _wrap(text: str, font: ImageFont.FreeTypeFont, width: float) -> list[str]:
+    """Greedy word wrap to ``width`` pixels. A single word wider than the line is cut
+    by characters rather than allowed to overflow."""
+    lines: list[str] = []
+    line = ""
+    for word in text.split():
+        while font.getlength(word) > width:
+            cut = len(word)
+            while cut > 1 and font.getlength(word[:cut]) > width:
+                cut -= 1
+            if line:
+                lines.append(line)
+                line = ""
+            lines.append(word[:cut])
+            word = word[cut:]
+        candidate = f"{line} {word}".strip()
+        if font.getlength(candidate) <= width:
+            line = candidate
+        else:
+            lines.append(line)
+            line = word
+    if line:
+        lines.append(line)
+    return lines
+
+
+def fit_title(text: str, width: float, cover_width: int) -> tuple[ImageFont.FreeTypeFont,
+                                                                   list[str]]:
+    """Largest font size whose wrap fits TITLE_MAX_LINES; past the minimum size, the
+    last line is truncated with an ellipsis."""
+    hi = round(cover_width * TITLE_MAX_FRACTION)
+    lo = round(cover_width * TITLE_MIN_FRACTION)
+    for size in range(hi, lo - 1, -1):
+        font = _font(size)
+        lines = _wrap(text, font, width)
+        if len(lines) <= TITLE_MAX_LINES:
+            return font, lines
+    font = _font(lo)
+    lines = _wrap(text, font, width)[:TITLE_MAX_LINES]
+    last = lines[-1]
+    while last and font.getlength(last.rstrip(" ,;:-") + "…") > width:
+        last = last[:-1]
+    lines[-1] = last.rstrip(" ,;:-") + "…"
+    return font, lines
+
+
+def title_overlay(image: Image.Image, title: str, *,
+                  strip_site: bool = False) -> Image.Image:
+    """Print ``title`` on a translucent rounded panel across the top of ``image``
+    (RGBA, modified and returned). No title, no panel."""
+    text = cover_title(title, strip_site=strip_site)
+    if not text:
+        return image
+    w = image.width
+    margin = round(w * MARGIN_FRACTION)
+    pad = round(w * TITLE_PAD_FRACTION)
+    font, lines = fit_title(text, w - 2 * (margin + pad), w)
+    line_h = round(font.size * TITLE_LINE_HEIGHT)
+    text_w = max(font.getlength(line) for line in lines)
+
+    panel_w = round(text_w) + 2 * pad
+    panel_h = line_h * len(lines) + 2 * pad
+    left = (w - panel_w) // 2
+    layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    draw.rounded_rectangle((left, margin, left + panel_w, margin + panel_h),
+                           radius=round(w * TITLE_RADIUS_FRACTION), fill=PANEL_RGBA)
+    for i, line in enumerate(lines):
+        draw.text((w / 2, margin + pad + line_h * (i + 0.5)), line, font=font,
+                  fill=TITLE_RGB, anchor="mm")
+    image.alpha_composite(layer)
+    return image
+
+
+def watermark(png: bytes, title: str = "", *, strip_site: bool = False) -> bytes:
+    """Print the title across the top (scribe#15), stamp the badge bottom-right with a
+    soft shadow, and return a baseline JPEG.
 
     JPEG because that is what an m4b cover is expected to be (mp4 `covr` takes JPEG or
     PNG, and players handle JPEG most widely), at a quality where the badge's flat
-    teal stays clean.
+    teal stays clean. A title that fails to render costs the title, not the cover.
     """
     image = Image.open(io.BytesIO(png)).convert("RGBA")
+    try:
+        image = title_overlay(image, title, strip_site=strip_site)
+    except Exception as exc:
+        log.warning("cover title overlay failed for %r: %s", title, exc)
     w = image.width
     size, margin = round(w * BADGE_FRACTION), round(w * MARGIN_FRACTION)
     badge = _badge().resize((size, size), Image.LANCZOS)
@@ -303,12 +427,12 @@ def watermark(png: bytes) -> bytes:
 
 
 def make_cover(settings: Settings, *, scene: str, style: str, seed: int,
-               title: str = "") -> bytes | None:
+               title: str = "", strip_site: bool = False) -> bytes | None:
     """Generate + watermark. Never raises; None means no cover this time."""
     t0 = time.monotonic()
     try:
         png = generate(settings, build_prompt(scene, style, title=title), seed=seed)
-        jpeg = watermark(png)
+        jpeg = watermark(png, title, strip_site=strip_site)
     except Exception as exc:
         log.warning("no cover for %r: %s", title, exc)
         return None
@@ -318,11 +442,11 @@ def make_cover(settings: Settings, *, scene: str, style: str, seed: int,
 
 
 def submit(settings: Settings, *, scene: str, style: str, seed: int,
-           title: str = "") -> Future[bytes | None]:
+           title: str = "", strip_site: bool = False) -> Future[bytes | None]:
     """Start a cover on the single cover thread. One at a time, because the image
     server is one GPU and a second request would only queue behind the first there."""
     return _executor.submit(make_cover, settings, scene=scene, style=style, seed=seed,
-                            title=title)
+                            title=title, strip_site=strip_site)
 
 
 def wait(future: Future[bytes | None] | None, timeout: float) -> bytes | None:
