@@ -184,6 +184,87 @@ class TestWatermark:
         assert min(out.getpixel((10, 10))[:3]) > 240, "rest of the image untouched"
 
 
+def _panel_rows(img: Image.Image) -> list[int]:
+    """Rows of a white cover that the title panel darkened (sampled at the centre)."""
+    return [y for y in range(img.height) if max(img.getpixel((img.width // 2, y))[:3]) < 200]
+
+
+class TestCoverTitle:
+    @pytest.mark.parametrize("raw, want", [
+        ("Lighthouse - Wikipedia", "Lighthouse"),
+        ("The Federalist No. 10 | The Avalon Project", "The Federalist No. 10"),
+        ("Why sourdough rises - Serious Eats", "Why sourdough rises"),
+        # An em dash separates author from title; the short tail is the title.
+        ("The Author — Notes on Quiet Grace", "The Author — Notes on Quiet Grace"),
+        ("Lighthouses - A Short Field Guide", "Lighthouses - A Short Field Guide"),
+        ("Part 1 - Origins: A History of Lighthouses on the Atlantic Coast",
+         "Part 1 - Origins: A History of Lighthouses on the Atlantic Coast"),
+        ("  Algorithms,   Chapter 3: Dynamic Programming ",
+         "Algorithms, Chapter 3: Dynamic Programming"),
+        ("Notes_on_logic_selections", "Notes on logic selections"),
+        ("", ""),
+    ])
+    def test_site_suffix_dropped_subtitles_kept(self, raw, want):
+        assert cover.cover_title(raw, strip_site=True) == want
+
+    def test_non_web_titles_keep_a_hyphenated_subtitle(self):
+        assert cover.cover_title("Lecture 5 - Dynamic Programming") == \
+            "Lecture 5 - Dynamic Programming"
+        assert cover.cover_title("Notes_on_logic") == "Notes on logic"
+
+    def test_short_title_one_line_at_the_largest_size(self):
+        font, lines = cover.fit_title("Lighthouses", 440, 512)
+        assert lines == ["Lighthouses"]
+        assert font.size == round(512 * cover.TITLE_MAX_FRACTION)
+
+    def test_long_title_shrinks_and_never_overflows(self):
+        text = "The Federalist Papers, Number Ten: The Same Subject Continued"
+        font, lines = cover.fit_title(text, 440, 512)
+        assert len(lines) <= cover.TITLE_MAX_LINES
+        assert all(font.getlength(line) <= 440 for line in lines)
+        assert " ".join(lines) == text
+
+    def test_absurd_title_truncates_with_an_ellipsis(self):
+        text = " ".join(["Lighthouse"] * 60)
+        font, lines = cover.fit_title(text, 440, 512)
+        assert len(lines) == cover.TITLE_MAX_LINES
+        assert lines[-1].endswith("…")
+        assert all(font.getlength(line) <= 440 for line in lines)
+
+    def test_unbreakable_word_is_cut_not_overflowed(self):
+        font, lines = cover.fit_title("x" * 200, 440, 512)
+        assert all(font.getlength(line) <= 440 for line in lines)
+
+    def test_panel_at_the_top_clear_of_the_badge(self):
+        long = "The Federalist Papers, Number Ten: The Same Subject Continued"
+        out = Image.open(io.BytesIO(cover.watermark(_png(), long)))
+        rows = _panel_rows(out)
+        assert rows and rows[0] >= round(512 * cover.MARGIN_FRACTION) - 1
+        badge_top = 512 - round(512 * cover.MARGIN_FRACTION) - round(512 * cover.BADGE_FRACTION)
+        assert rows[-1] < badge_top
+        # Translucent, not opaque: the white behind still lifts the panel off black.
+        y = rows[0] + 2
+        assert min(out.getpixel((60, y))[:3]) > 40
+
+    def test_no_title_no_panel(self):
+        out = Image.open(io.BytesIO(cover.watermark(_png())))
+        assert _panel_rows(out) == []
+
+    def test_overlay_failure_keeps_the_cover(self, monkeypatch):
+        def boom(*a, **k):
+            raise OSError("font missing")
+
+        monkeypatch.setattr(cover, "title_overlay", boom)
+        out = Image.open(io.BytesIO(cover.watermark(_png(), "Lighthouses")))
+        assert out.format == "JPEG" and min(out.getpixel((256, 30))[:3]) > 240
+
+    def test_make_cover_prints_the_title(self, monkeypatch):
+        monkeypatch.setattr(cover, "generate", lambda *a, **k: _png())
+        out = cover.make_cover(_settings(), scene="a scene", style="flat", seed=1,
+                               title="Lighthouses")
+        assert _panel_rows(Image.open(io.BytesIO(out)))[0] < 100
+
+
 class TestMakeCoverNeverRaises:
     def test_generation_failure_is_none(self, monkeypatch):
         def boom(*a, **k):
