@@ -250,7 +250,8 @@ def _audio_stage(settings: Settings, client, job, doc, summary,
     if settings.cover_host and settings.cover_style in covers.STYLES:
         cover_future = covers.submit(settings, scene=getattr(job, "cover_scene", ""),
                                      style=settings.cover_style,
-                                     seed=covers.seed_for(job.id), title=title)
+                                     seed=covers.seed_for(job.id), title=title,
+                                     strip_site=doc.kind == "link")
     # Time spent blocked on the cover is not synthesis. On a short document the cover
     # can outlast Kokoro, and counting that wait would teach the audio calibration
     # (scribe#8) that synthesis got slower.

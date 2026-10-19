@@ -214,7 +214,8 @@ def _cmd_cover_backfill(args: argparse.Namespace) -> int:
             print(f"plan  {it['title']!r}\n      {plan.style}: {prompt}", flush=True)
             continue
         jpeg = cover.make_cover(settings, scene=plan.scene, style=plan.style,
-                                seed=cover.seed_for(it["id"]), title=summary.title)
+                                seed=cover.seed_for(it["id"]), title=summary.title,
+                                strip_site=info["description"].startswith(("http://", "https://")))
         if not jpeg:
             print(f"FAIL  {it['title']!r}: no image", flush=True)
             failed += 1
