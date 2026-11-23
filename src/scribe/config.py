@@ -110,7 +110,7 @@ class Settings(BaseSettings):
         return {c.strip() for c in self.drop_channels.split(",") if c.strip()}
 
     # --- ETA shown in the Slack ack -------------------------------------------------
-    # All three MEASURED on <pve-host> (<ct>) on 2026-08-27, not derived. They are host
+    # All three MEASURED on the CPU Ollama host on 2026-08-27, not derived. They are host
     # constants: rehoming ollama means re-measuring them, like num_thread.
     #   ocr page:  ~3 min/page incl. the amortized glm-ocr <-> qwen swap
     #   map chunk: warm average over the clean post-16k-fix Bloom filter chunks

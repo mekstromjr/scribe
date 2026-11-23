@@ -13,7 +13,7 @@ from scribe.eta import _budget_chars, _model_seconds, estimate_seconds, eta_line
 
 SETTINGS = Settings(slack_bot_token="", slack_app_token="")
 
-# The deployment overrides context_tokens down to 14000 (<pve-host>'s 16k window minus the
+# The deployment overrides context_tokens down to 14000 (the Ollama host's 16k window minus the
 # 4-chars/token overshoot margin — see k8s apps/scribe). The chunk-math tests use the
 # same shape so they exercise the map-reduce branch the way production reaches it.
 DEPLOYED = Settings(
