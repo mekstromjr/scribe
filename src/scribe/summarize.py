@@ -156,7 +156,7 @@ def _map_reduce(settings: Settings, doc: Document, budget_chars: int, abort=None
     for n, piece in enumerate(chunks, start=1):
         # Cancellation checkpoint: a canceled job stops before the next model call
         # rather than after the whole document. Chunks are the long pole (~8 min each
-        # on <pve-host>), so this is the granularity that matters.
+        # on the Ollama host), so this is the granularity that matters.
         if abort:
             abort()
         data, secs = chat_structured(
