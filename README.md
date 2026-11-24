@@ -1,359 +1,136 @@
 # scribe
 
-> **Read-only mirror.** This project is developed on a self-hosted GitLab instance and
-> mirrored to GitHub for visibility. Issues and pull requests are not accepted here;
-> the mirror is overwritten on every push. Contact: see the profile of [@mekstromjr](https://github.com/mekstromjr).
+A Slack bot: send it a link, PDF or image, and it replies in the thread with a short
+summary, the full note as a file, and a narrated audiobook (m4b). The bot runs in a
+Kubernetes cluster and uses only local, CPU-only models.
 
-Send a link, PDF, or image to Slack; get a brief summary back in thread, followed by the
-full note as a file (PDF by default, or Markdown, Word, or nothing) with a thorough summary
-plus the complete extracted text.
+![A scribe thread in Slack: the bot acknowledges a link with an ETA for the summary and the audio, then replies with the article title, link, and a paragraph summary](docs/screenshots/scribe-thread.webp)
 
-Backed by [`ollama-mini`](https://gitlab.meklab.net/meklab/k8s/-/tree/main/apps/ollama-mini)
-(CPU-only Ollama in the `infra` namespace).
+**Status:** in daily use. Deployed in-cluster as a container image; current release
+v0.18.0. Developed on a self-hosted GitLab; this GitHub repo is a read-only mirror.
 
-**Status: Phase 4 — Slack Socket Mode bot written, not yet verified against live Slack**
-(needs the app tokens; see [SLACK_SETUP.md](SLACK_SETUP.md)). Everything below Slack —
-extraction, summarization, note rendering, note export — is working and verified.
+## How it works
 
-## The core design decision: extract before OCR
+```mermaid
+flowchart LR
+    S[Slack DM or mention] -->|Socket Mode| Q[durable spool queue]
+    Q --> X{extract}
+    X -->|PDF with text layer| T[PDFium text]
+    X -->|scanned page or image| O[glm-ocr]
+    X -->|link| W[trafilatura]
+    T & O & W --> M[qwen3.5:4b summary]
+    M --> R[summary + note file in thread]
+    M --> A[audio queue]
+    A --> K[Kokoro TTS + cover art]
+    K --> B[m4b in thread and Audiobookshelf]
+```
 
-Lecture slides exported from PowerPoint/Keynote/LaTeX carry a selectable text layer, and so
-does every article. Reading that layer is lossless and effectively instant. Running the
-vision model over those pages instead is both slower *and worse* — vision models paraphrase
-and silently drop content, while PDFium returns exactly what is embedded.
+1. A message arrives over Slack Socket Mode and is written to a spool on disk, then
+   acknowledged immediately with an ETA for the summary and for the audio.
+2. Text is extracted: a PDF's embedded text layer first, OCR (`glm-ocr` via Ollama) only
+   for pages without one, and readable article text for links.
+3. `qwen3.5:4b` produces the summary and the note. The TL;DR is posted in the thread,
+   followed by the full note as PDF, Markdown or Word.
+4. A second worker turns the note into a listening script, synthesizes it with Kokoro,
+   draws a cover with SD-Turbo, packages a chaptered m4b with ffmpeg, and posts it to the
+   thread and to an Audiobookshelf library.
 
-So scribe reads the text layer per page and falls back to `glm-ocr` **only** for pages that
-yield no meaningful text. Measured on real files:
+## Engineering decisions
 
-| Input | Pages | Path | Time |
-|---|---|---|---|
-| Sheet-music PDF (text layer) | 39 | text-layer | **0.53s**, 0 OCR calls |
-| Scanned recipe card (no text layer) | 1 | OCR fallback | ~40s |
-| Wikipedia article | 1 | trafilatura | ~1s |
+- **Read the text layer before OCR.** Most PDFs people send (slides, papers, exported
+  documents) already carry selectable text. Reading it per page and OCRing only the pages
+  that have none took a 39-page PDF from an estimated 15-25 minutes of CPU OCR to about
+  half a second, and the text is exact instead of paraphrased by a vision model.
+- **Two workers, joined by the spool.** Summarizing is bound by the single CPU Ollama
+  host, which serves one request at a time, so it gets exactly one worker. Audio is bound
+  by a different server, so it has its own. The hand-off is a record on disk, so a
+  restart resumes both halves instead of dropping promised work.
+- **Guard the OCR model's failure modes.** `glm-ocr` can generate forever on a sparse
+  page (one title page ran past 14,000 tokens). Generation is capped at about 2x the
+  densest measured page and OCR has its own timeout; a page that hits either is recorded
+  as skipped with the reason, and the rest of the document proceeds.
+- **Send `num_thread` on every request.** llama.cpp sizes its thread pool from the host's
+  cores, not the container's CPU limit. Pinning it to the limit measured +73% generation
+  speed (4.0 to 6.9 tokens/s) on `qwen3.5:4b`.
+- **The ETA learns.** Each stage's estimate is multiplied by a correction factor learned
+  from clean completions (an exponentially weighted mean of `log(actual/predicted)`), and
+  quotes use the upper side of the spread so acks land early more often than late.
+- **The listening script is rules, not a model.** An experiment on six real sources
+  compared deterministic text cleanup with LLM repair prompts; every LLM variant added
+  markup or dropped content, so there is no LLM pass. Reflowing PDF lines into paragraphs
+  cut mid-sentence audio segment boundaries on a 62-page chapter from 33 of 57 to 2.
+- **Nothing listens.** Socket Mode is an outbound WebSocket, so the pod needs no Service,
+  Ingress or certificate. Slack scopes are limited to DMs and @-mentions.
+- **Best-effort extras.** Audio, cover art and note export run after the summary is
+  already in the thread; their failures cost that extra, never the job.
 
-The same 39-page PDF forced through OCR would take roughly 15-25 minutes. OCR is the
-exception, not the default.
+More detail: [docs/design-notes.md](docs/design-notes.md) (per-person settings, the
+listening-script rules, ETA calibration, cover art, note delivery) and
+[docs/measurements.md](docs/measurements.md) (OCR latency, DPI, thread tuning).
 
-## Usage
+## Running it locally
+
+Requires Python 3.12+, [uv](https://docs.astral.sh/uv/), and an
+[Ollama](https://ollama.com) server with the two models pulled. Note export needs
+`pandoc` (and weasyprint's Pango/Cairo libraries for PDF); audio needs `ffmpeg` plus a
+Kokoro TTS server. The [Dockerfile](Dockerfile) lists the exact system packages.
 
 ```bash
+git clone https://github.com/mekstromjr/scribe.git
+cd scribe
 uv sync
 
-# Which Ollama am I actually talking to? (see the port warning below)
-scribe health
+ollama pull glm-ocr
+ollama pull qwen3.5:4b
+uv run scribe health                      # which Ollama answered, and does it have the models
 
-# Classify a PDF without spending any CPU
-scribe probe deck.pdf
+uv run scribe probe deck.pdf              # does this PDF have a text layer? (no model calls)
+uv run scribe extract deck.pdf --per-page # method and timing for each page
+uv run scribe note https://example.com/article
+uv run scribe export --format pdf deck.pdf --out-dir ~/Downloads
+uv run scribe listen --dry-run deck.pdf   # print the listening script, synthesize nothing
 
-# Extract; --per-page shows the method and timing for each page
-scribe extract deck.pdf --per-page
-scribe extract https://example.com/article
-scribe extract scan.png
-
-# Extract + summarize + render the note markdown (prints it)
-scribe note deck.pdf
-scribe note https://example.com/article --out-dir ~/notes
-
-# ...or write it as a file, the way the bot posts it (pdf | md | docx)
-scribe export --format pdf deck.pdf
-scribe export --format docx https://example.com/article --out-dir ~/Downloads
-
-# Run the Slack bot (blocks; needs the two Slack tokens)
-scribe serve
+uv run scribe serve                       # the Slack bot; needs the two Slack tokens
 ```
 
-### Running against the cluster from a laptop
+Slack app creation and the two tokens are covered in [SLACK_SETUP.md](SLACK_SETUP.md),
+using [manifest.json](manifest.json). In the cluster the image runs `scribe serve` with
+the spool on a persistent volume.
 
-`ollama-mini` is ClusterIP-only (Ollama ships no authentication, so it has no Ingress):
+## Testing and CI
 
 ```bash
-kubectl -n infra port-forward svc/ollama-mini 11500:11434
-SCRIBE_OLLAMA_HOST=http://127.0.0.1:11500 scribe health
+uv run ruff check src/ tests/
+uv run pytest -q          # 330 passed, 1 skipped; no network needed
 ```
 
-**Do not use local port 11434.** The dev Mac runs its own native ollama there. A
-`port-forward` to 11434 binds IPv6 `[::1]` while the native instance holds IPv4
-`127.0.0.1`, so `localhost:11434` resolves to either one unpredictably — requests silently
-go to the wrong server. `scribe health` exists to catch exactly this: it prints the host and
-the models it serves, and fails if the expected models are missing.
-
-## Measured behaviour worth knowing
-
-- **OCR latency is variable, roughly 20-60s per page.** The same page at the same DPI
-  measured 20.6s and 40.3s on different runs — it moves with node contention. Treat it as a
-  range, not a constant.
-- **`glm-ocr` can loop forever on a sparse page.** A book's title page (mostly whitespace
-  and a scan gutter) ran to 14,000+ tokens and was still going when the 16k context filled;
-  dense pages from the same scan produced 739-1,475. Ollama's default `num_predict` is
-  unlimited, so scribe caps OCR generation (`SCRIBE_OCR_NUM_PREDICT`, 2x the densest measured
-  page) and gives OCR its own timeout. A page that hits either is recorded as SKIPPED with the
-  reason, and the rest of the document proceeds — both signals are deterministic, so
-  requeueing would only reproduce them. Finished OCR pages are cached in the spool so a
-  genuine requeue resumes instead of redoing them (scribe#4).
-- **Render DPI is the main OCR cost lever.** 200 DPI cost ~50% more wall clock than 150 for
-  a byte-identical transcription, so the default is 150.
-- **`glm-ocr` reports zero for every timing field** it returns (`load_duration`,
-  `eval_count`, `total_duration`). Wall clock is measured client-side; trusting the API's
-  own numbers yields a confident, wrong `0.0s`.
-- **`glm-ocr` emits LaTeX for typographic glyphs** — a printed `½` comes back as
-  `$\frac{1}{2}$`, which Obsidian would render as MathJax. `normalize_latex()` undoes this
-  for short spans while leaving genuine equations intact.
-- **Set `num_thread` to the container CPU limit — this is the single biggest
-  lever.** llama.cpp sizes its thread pool from *host* core count and ignores the
-  cgroup quota, so on a 10-CPU node with a 6-CPU limit it oversubscribes and the
-  threads fight CFS throttling. Measured on `qwen3.5:4b`:
-
-  | Config | Prompt eval | Generation |
-  |---|---|---|
-  | default (host count) | 26.6-29.3 t/s | **3.9-4.1 t/s** |
-  | `num_thread=5` | 26.8 t/s | 6.7 t/s |
-  | `num_thread=6` | **43.3 t/s** | **6.9 t/s** |
-
-  There is no server-side env var for this — it is a per-request model option, so
-  **every client must send it**. Counter-intuitively, low measured CPU (4515m
-  against a 6000m limit) is evidence *for* contention, not against it: a
-  throttled thread is not burning CPU while it waits.
-- **Identify honestly in the User-Agent.** Measured against Wikipedia, a spoofed browser
-  string gets `403` with a bot-policy notice, while `scribe/0.1 (...; contact)` gets `200`.
-  Wikimedia's robot policy asks automated clients to declare themselves; complying works
-  better than evading.
-
-## Runtime settings are per person
-
-`/scribevoice`, `/scribeformat`, `/scribecover` and `/scribetoggletts` change the settings of whoever
-runs them, keyed by Slack user id, and each document is processed under its sender's
-settings. Nobody has to fight over the voice. Append `default` to a command to change
-the shared layer everyone falls back to instead; `/scribeconfig` shows your settings,
-the shared defaults, and which keys you have overridden.
-
-Resolution order, narrowest first: your overrides, the shared overrides, environment,
-code default. Overrides live in `config.json` beside the spool and hold only keys that
-were explicitly set, so a manifest change to an untouched key still takes effect.
-
-Voice choice is free. A Kokoro voice pack is about half a megabyte and loads only when a
-document is synthesized with it, so auditioning a dozen voices costs nothing; the memory
-that server uses is the model and its per-request leak, not voices.
-
-`/scribevoice` with no argument links to **Scribe voice samples** on the shelf, one item
-with a chapter per voice all reading the same passage, then lists the ids grouped by
-language and gender (`af_` American female, `bm_` British male, and so on; `v0` ids are
-older versions). The item is built once by `scribe voice-samples` in the pod and rebuilt
-by hand if the voice list changes.
-
-## Whose file is this
-
-Every m4b on the shelf is filed under the sender: the item joins a **collection** named
-with the person's first name (from their Slack profile) and gets a **tag** with it, the
-voice id becomes the **narrator**, and the source URL or filename the description. A
-collection rather than a series because a series is one ordered work and a collection is
-a named shelf of unrelated items, with its own tab in the library. The voice and person
-are written through the API once the scan finds the item; the file's own tags carry only
-the voice (composer) and source (comment). Not `grouping`: Audiobookshelf reads that as a
-fallback series tag, and writing the person there filed every item into a per-person
-series until it was dropped. Items from before this existed were back-filled with
-`scribe abs-backfill --person <Name>`.
-
-## The listening script is rules, measured
-
-The text sent to Kokoro is produced by deterministic rules, not a model. An experiment
-on six real sources (2026-09-16, `experiments/tts_cleanup/`) compared the rules with the
-legacy LLM repair prompt, alone and on top of the rules, and a speech-framed rewrite of
-that prompt. The rules had the fewest artifacts on every source; every LLM variant added
-markup or removed content (a chapter's epigraphs, a paper's prose). So there is no LLM
-pass, and the artifact classes only a model could fix are recorded on the issue as the
-spec for a targeted span-repair if feedback ever calls for one.
-
-What the rules do for a PDF text layer, which arrives as printed lines with no paragraph
-marks:
-
-- **Reflow** rebuilds paragraphs from line shape: a paragraph ends where a line is short
-  for its page and ends a sentence. Soft wraps and hyphenated wraps are joined, a sentence
-  split across a page break is healed, and runs of short sentence-less lines, which is
-  what pseudocode and figure labels look like, are dropped. Measured on a 62-page chapter:
-  33 of 57 segment boundaries fell mid-sentence before, 2 after.
-- **Missing glyphs** (U+FFFE and private-use codepoints, where LaTeX PDFs put ligatures,
-  footnote superscripts and minus signs) become the ligature a small lexicon says fits
-  inside a word, a space between a word and a capital, and nothing elsewhere.
-- **Headings** are judged with detached diacritics removed, must contain a real word,
-  and may not look like an author line, a table header or figure text. The chapter list
-  on that textbook went from 3 entries to 21.
-- **Sentence splitting**, the fallback for an oversized paragraph, no longer breaks on
-  abbreviations, initials or bare list markers.
-
-`scribe listen --dry-run <file>` prints the script and its lint findings without
-synthesizing anything. A finding means a rule is missing.
-
-## The estimate learns
-
-The ack quotes two times: when the summary will be in the thread, and when the audio
-will. Each is a per-stage model in things known at ack time (characters, OCR pages,
-which summarize branch) times a **learned correction factor** per stage. Every clean
-completion feeds back `log(actual / predicted)` into an exponentially weighted mean and
-spread for that stage; quotes use the upper side of the spread, so acks land early more
-often than late. The `SCRIBE_ETA_*` constants are only the priors a fresh spool starts
-from. Learned state lives in the `calibration` section of `config.json` beside the spool.
-
-- **Clean completions only.** Retries, cancels and OCR runs that skipped or capped pages
-  teach nothing; one absurd job is clamped so it cannot poison the next ten estimates.
-- **The in-flight job counts at its remaining time**, not its full estimate, when a
-  queue wait is quoted.
-- **The audio quote is re-issued exactly** in the TL;DR reply, from the real listening
-  script length and the audio queue at that moment.
-- **Audit trail in Loki.** Every ack logs `eta.ack ...`, every stage logs `eta.actual ...`,
-  every update logs `eta.learn ...`. To see estimate vs actual per stage:
-
-  ```
-  {namespace="infra", container="scribe"} |~ "eta\\.(ack|actual|learn)"
-  ```
-
-  `scribe calibration` (or the tail of `/scribeconfig`) shows the current factors.
-
-## Titles are a ladder, and the filename is the bottom rung
-
-A file's name is rarely its title (`03-dynprog.pdf` is a chapter on dynamic programming),
-so the note, the Slack file and the Audiobookshelf entry are named by the first rung that
-holds: the PDF's own metadata Title when it is real; then the model's title, which the
-prompt asks to name the larger work and chapter when the text makes that identifiable;
-then the filename stem. "Real" excludes filenames in disguise: slugs, office-suite export
-prefixes, placeholders like "untitled". A link keeps the page's own title, as before.
-
-## Two workers, two stages
-
-Summarizing is Ollama-bound and Ollama serves one request at a time, so there is one
-summarize worker. Audio is Kokoro-bound, a different server, so it has its own worker:
-the moment a document's note is posted, its audio half is written to the spool as an
-`AudioJob` and the summarize worker moves on. The next document's TL;DR lands while the
-last one's m4b is still being made.
-
-- **The hand-off is through the spool, not memory.** An audio job that was promised
-  survives a restart; on start-up audio jobs resume first, silently, because their
-  threads already have a note.
-- **The sender's TTS settings are frozen in the record.** A voice change typed while a
-  job waits for audio applies to the next document, not the one already acknowledged.
-- **Cancel still finds it.** Both halves register under the same id, so "cancel" in the
-  thread drops a waiting audio job, or stops a running one at its next segment.
-
-## Cover art
-
-Every audiobook gets a cover drawn for it (scribe#14): a 512x512 image from a
-[stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp) `sd-server`
-running SD-Turbo, with the scribe badge in the bottom-right corner. It is embedded in the
-m4b as an attached picture, and Audiobookshelf's scanner takes an embedded cover for any
-new item that has none, so no extra API call is involved.
-
-- **The subject comes from the document.** At hand-off, one short text-model call reads
-  the finished summary (title, TL;DR, tags, body) and describes a single concrete scene.
-  It steers toward objects and places and away from any lettering, because SD-Turbo
-  cannot spell and draws people and animals badly. The scene is deliberately NOT a field
-  of the summary request: adding one there shifted the summaries themselves (one article's
-  summary came out a third shorter), and the summary is the product.
-- **The style is a per-person setting**, like the voice. `/scribecover` takes `flat`,
-  `storybook`, `painterly`, `watercolor`, `woodcut` or `poster`; `random`; `off`; or
-  `auto` (the default), where that same call also picks the style that suits the
-  document.
-- **Everything is decided at hand-off**, in the summarize worker, and frozen into the
-  audio spool record with the voice: the scene and one concrete style. The audio worker
-  never calls the text model, and a job resumed after a restart keeps the cover it was
-  given. The seed is derived from the job id, so a resumed job draws the same image.
-- **It costs no wall clock on a normal document.** The image is generated on a separate
-  machine while Kokoro synthesizes, and the m4b waits for it only at packaging time.
-  Time spent waiting is excluded from the audio calibration. One cover measured 143 s at
-  the production settings (4 steps, full VAE).
-- **Best-effort, like the audio itself.** A dead image server, a timeout or a bad
-  response costs the cover, logged; the audiobook ships without one.
-- **Lettering is removed by rule, not just asked for.** The negative prompt is inert at
-  SD-Turbo's cfg 1.0, and on abstract topics the text model still asks for "signs
-  labeled ..." now and then (the first production drop drew a sign reading nonsense).
-  `cover.clean_scene` strips quoted strings, label phrases and lettered props from the
-  scene before the image call, keeping ordinary verbs ("a woman reading a book").
-- **Older items: `scribe cover-backfill`.** Draws a cover for every shelf item that has
-  none and uploads it through the ABS API (the m4b files are left alone). The shelf keeps
-  no summary, so the scene is planned from the title and chapter titles. `--dry-run`
-  prints the plans, `--force` redoes items that already have a cover, `--title` limits it.
-  At ~1 min of planning plus ~2.5 min of drawing per item, run it detached in the pod.
-- **The badge is rebuilt, not cropped**: `scripts/make_badge.py` extracts the emblem from
-  `assets/scribe-logo-minimalist.jpg` by colour and draws it on a fresh disk, writing
-  `src/scribe/assets/scribe-badge.png`.
-
-## Note delivery
-
-The full note is posted into the Slack thread as a file, right after the TL;DR reply, in
-whatever format `/scribeformat` selects (`pdf` by default; `md`, `docx`, or `none`).
-Nothing is written anywhere else: a note worth keeping is downloaded and filed by hand,
-so several people can use one bot without filling anyone's vault.
-
-- **`md` is the renderer's output verbatim**, frontmatter, tags and Obsidian callout
-  included, so it drops into a vault unchanged.
-- **`pdf` and `docx` are renderings of that same markdown** with the Obsidian-only
-  syntax made portable: the frontmatter block goes, the collapsed callout becomes a
-  plain blockquote with a bold lead. pandoc produces the docx directly and the HTML for
-  the PDF; weasyprint lays the PDF out. No TeX in the image.
-- **Export is best-effort, like audio.** By the time it runs the summary is already in
-  the thread, so a pandoc or upload failure costs the file and posts a one-line apology;
-  it never fails or requeues the job.
-
-## Slack
-
-DM the bot, or @-mention it, with a link or an attached PDF/image. It acknowledges in
-thread immediately, then replies with the TL;DR and the note name when the work is done.
-
-**Socket Mode, not the Events API** — Slack cannot reach this network (the cluster is
-behind Tailscale CGNAT with no public ingress), so scribe opens an *outbound* WebSocket
-instead. A useful consequence: scribe needs no Service, no Ingress and no certificate,
-because nothing ever connects *to* it.
-
-The Slack CLI is **not usable** for setup here — `slack login` returns "This workspace is
-not eligible for the next generation Slack platform." That gate is about Slack's
-Deno-hosted platform, which needs a paid plan; Socket Mode and bot tokens are free.
-[SLACK_SETUP.md](SLACK_SETUP.md) covers the web-UI path using `manifest.json`.
-
-Two design points:
-
-- **Work is serialized behind one worker.** ollama-mini runs `OLLAMA_NUM_PARALLEL=1` on
-  CPU, so concurrent documents would not finish sooner — they would thrash a shared
-  bottleneck and slow everything. The ack says how many jobs are ahead of you.
-- **The immediate ack is not cosmetic.** A document takes minutes; without it there is no
-  signal anything is happening.
-
-Scopes are minimal by design: `im:history` plus `app_mentions:read` means scribe sees only
-DMs sent to it and messages that @-mention it. There is no `channels:history`, so it
-cannot read channel traffic it was not addressed in.
-
-## Reused from recipe-pipeline
-
-`src/scribe/ollama.py` and the PDF rendering in `src/scribe/extract/pdf.py` are adapted from
-`recipe-pipeline/worker/src/recipe_pipeline/`. **Deliberately copied, not shared** — that
-pipeline is live, and refactoring it into a library was out of scope. If either diverges
-meaningfully, revisit.
-
-Note the two solve different problems: recipe-pipeline OCRs handwritten cursive with Apple
-Vision and never reads a text layer (its inputs never have one). scribe is text-layer-first
-because its inputs usually do.
+Slack, Ollama, Kokoro and Audiobookshelf are stubbed in tests. The GitLab pipeline runs
+secret detection, ruff and pytest on every branch, then builds the image with Kaniko on
+`main` and on semver tags; the Kubernetes Deployment pins a release tag.
 
 ## Configuration
 
-All settings are env-overridable with the `SCRIBE_` prefix (see `src/scribe/config.py`).
+Every setting is an environment variable with the `SCRIBE_` prefix (also read from
+`.env`); see [src/scribe/config.py](src/scribe/config.py) for the full list and the
+reasoning behind each default.
 
-| Setting | Default | Notes |
+| Variable | Default | Purpose |
 |---|---|---|
-| `SCRIBE_OLLAMA_HOST` | `http://ollama-mini.infra.svc.cluster.local:11434` | In-cluster address |
-| `SCRIBE_OCR_MODEL` | `glm-ocr:latest` | Vision fallback |
-| `SCRIBE_TEXT_MODEL` | `qwen3.5:4b` | Summarization |
+| `SCRIBE_OLLAMA_HOST` | `http://localhost:11434` | Ollama server; the cluster Deployment sets the in-cluster address |
+| `SCRIBE_OCR_MODEL` | `glm-ocr:latest` | Vision model for pages without a text layer |
+| `SCRIBE_TEXT_MODEL` | `qwen3.5:4b` | Summarization model |
+| `SCRIBE_NUM_THREAD` | `6` | Must equal the Ollama host's CPU allocation; the Deployment sets it |
+| `SCRIBE_CONTEXT_TOKENS` | `32768` | Must match the server's `OLLAMA_CONTEXT_LENGTH` |
 | `SCRIBE_MIN_PAGE_CHARS` | `24` | Below this, a page falls through to OCR |
 | `SCRIBE_OCR_RENDER_DPI` | `150` | Main OCR cost lever |
-| `SCRIBE_NUM_THREAD` | `6` | **Must match the CPU limit in `apps/ollama-mini/deployment.yaml`** |
-| `SCRIBE_OCR_MAX_EDGE` | `1500` | Longest-edge cap for vision input |
-| `SCRIBE_MAX_OCR_PAGES` | `0` (unlimited) | Skipped pages are recorded, not silently dropped |
-| `SCRIBE_OCR_NUM_PREDICT` | `3000` | Generation cap per OCR page; hitting it skips the page (runaway guard) |
-| `SCRIBE_OCR_TIMEOUT_SECONDS` | `900` | Per-page OCR deadline, separate from the summarization timeout; must exceed cap / slowest tok/s |
-| `SCRIBE_COVER_HOST` | *(empty: covers off)* | sd-server base URL for cover art, e.g. `http://diffusion.meklab.net:1234` |
-| `SCRIBE_COVER_STYLE` | `auto` | Shared default cover style; `/scribecover` overrides per person |
-| `SCRIBE_COVER_STEPS` | `4` | SD-Turbo sampling steps (1-4) |
-| `SCRIBE_COVER_TIMEOUT_SECONDS` | `600` | How long packaging waits for a cover before shipping without one |
-| `SCRIBE_NOTE_FORMAT` | `pdf` | How the full note is delivered in-thread: `pdf`, `md`, `docx`, `none`; `/scribeformat` overrides at runtime |
-| `SCRIBE_SLACK_BOT_TOKEN` | *(none)* | `xoxb-` from installing the app |
-| `SCRIBE_SLACK_APP_TOKEN` | *(none)* | `xapp-` with `connections:write`, for Socket Mode |
+| `SCRIBE_OCR_NUM_PREDICT` | `3000` | Generation cap per OCR page (runaway guard) |
+| `SCRIBE_NOTE_FORMAT` | `pdf` | `pdf`, `md`, `docx` or `none`; `/scribeformat` overrides per person |
+| `SCRIBE_TTS_HOST` | in-cluster Kokoro address | Kokoro TTS server for audio |
+| `SCRIBE_COVER_HOST` | empty (covers off) | stable-diffusion.cpp `sd-server` for cover art |
+| `SCRIBE_SPOOL_DIR` | `~/.local/state/scribe/queue` | Durable job queue; a persistent volume in the cluster |
+| `SCRIBE_SLACK_BOT_TOKEN` | none | `xoxb-` token from installing the app |
+| `SCRIBE_SLACK_APP_TOKEN` | none | `xapp-` token with `connections:write`, for Socket Mode |
 
-## Roadmap
+## License
 
-- **Phase 5** — deploy to `infra`, Standard tier, Deployment only (no Service/Ingress)
+[MIT](LICENSE)
