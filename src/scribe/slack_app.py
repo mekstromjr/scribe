@@ -5,8 +5,8 @@ reach this network: the cluster sits behind Tailscale CGNAT with no public ingre
 also means scribe needs no Service, no Ingress, and no certificate — nothing connects to
 it.
 
-Work is deliberately serialized behind a single worker. ollama-mini runs
-OLLAMA_NUM_PARALLEL=1 on CPU, so concurrent documents would not finish sooner — they
+Work is deliberately serialized behind a single worker. The Ollama host serves one
+request at a time on CPU, so concurrent documents would not finish sooner — they
 would thrash a shared bottleneck and make every request slower. Queueing is honest.
 """
 
@@ -499,7 +499,7 @@ def _process(settings: Settings, client, job: Job, requeue=lambda _job: None,
         )
     except OllamaError as exc:
         # Transient: the model server was unreachable. Retry rather than drop
-        # the job. This is what lost a document when an ollama-mini rollout happened to
+        # the job. This is what lost a document when an Ollama rollout happened to
         # land while the queue was resuming.
         if job.attempts + 1 < settings.max_attempts:
             job.attempts += 1

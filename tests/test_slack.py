@@ -72,7 +72,7 @@ class TestHelpGating:
 
 class TestRetryClassification:
     """A transient dependency outage must not permanently lose a queued document — that is
-    the durability the spool exists to provide. An ollama-mini rollout landing while the
+    the durability the spool exists to provide. An Ollama rollout landing while the
     queue resumed cost a document exactly this way."""
 
     def test_transient_errors_are_retried(self):

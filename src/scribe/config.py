@@ -11,17 +11,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SCRIBE_", env_file=".env", extra="ignore")
 
-    # In-cluster default. ollama-mini is ClusterIP-only (no Ingress) because Ollama ships
-    # no authentication, so this is the only address that resolves in production.
+    # Default is a local Ollama, for running the CLI on a laptop. In the cluster the
+    # Deployment sets SCRIBE_OLLAMA_HOST to the CPU Ollama host's address. Ollama ships no
+    # authentication, so that host should only be reachable from where scribe runs.
     #
-    # For laptop testing, port-forward and override:
-    #   kubectl -n infra port-forward svc/ollama-mini 11500:11434
-    #   SCRIBE_OLLAMA_HOST=http://127.0.0.1:11500 scribe extract file.pdf
-    #
-    # Do NOT use local port 11434 — the dev Mac runs its own native ollama there, and
-    # "localhost:11434" resolves ambiguously between the two (kubectl binds ::1, native
-    # ollama binds 127.0.0.1). That silently sends requests to the wrong server.
-    ollama_host: str = "http://ollama-mini.infra.svc.cluster.local:11434"
+    # To use a remote Ollama from a laptop, forward it to a port OTHER than 11434 and
+    # override, e.g. SCRIBE_OLLAMA_HOST=http://127.0.0.1:11500. If a native ollama is also
+    # running locally, "localhost:11434" can resolve ambiguously between the two (a tunnel
+    # may bind ::1 while the native server binds 127.0.0.1). `scribe health` shows which
+    # server answered and which models it has.
+    ollama_host: str = "http://localhost:11434"
 
     ocr_model: str = "glm-ocr:latest"
     text_model: str = "qwen3.5:4b"
@@ -75,8 +74,8 @@ class Settings(BaseSettings):
     # oversubscribes and the threads fight CFS throttling. Pinning to the limit measured
     # +73% generation (4.0 -> 6.9 tok/s) and +48% prompt eval on qwen3.5:4b.
     #
-    # Must track the CPU limit in k8s apps/ollama-mini/deployment.yaml. There is no server
-    # env var for this — it is a per-request model option, so every caller must send it.
+    # Must track the Ollama host's CPU allocation (the Deployment sets it). There is no
+    # server env var for this — it is a per-request model option, so every caller must send it.
     #
     # Note: changing this value forces Ollama to reload the model (~30s), so it should be
     # set once and left alone rather than tuned per request.
